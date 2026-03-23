@@ -1,0 +1,219 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * Bela Audio Cape RevC Device Tree Overlay
+ * BeagleBone Black / BeagleBone AI
+ *
+ * Audio topology:
+ *   TLV320AIC3104 — stereo codec, BCLK/FSYNC master, TDM slots 0-1
+ *   ES9080Q       — 8-channel DAC, BCLK/FSYNC slave,  TDM slots 2-9
+ *
+ * McASP0 serializer assignment:
+ *   AXR0 (RX) — receives audio from TLV320AIC3104 (capture)
+ *   AXR2 (TX) — sends audio to TLV320AIC3104 (playback, slots 0-1)
+ *   AXR3 (TX) — sends audio to ES9080Q (playback, slots 2-9)
+ *
+ * Clock topology:
+ *   AHCLKX pin    — MCLK output to both codecs (24.576 MHz via gpio-gate-clock)
+ *   ACLKX/FSX     — BCLK/FSYNC inputs from TLV320AIC3104 (McASP is slave)
+ */
+/dts-v1/;
+/plugin/;
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/pinctrl/am33xx.h>
+
+&{/chosen} {
+	overlays {
+		BB-BONE-BELA-REVC-00A0.bb.org-overlays = __TIMESTAMP__;
+	};
+};
+
+/* --------------------------------------------------------------------------
+ * Clocks
+ *
+ * clk_mcasp0_fixed: crystal/oscillator reference — 24.576 MHz covers the
+ * 48 kHz sample-rate family.  The machine driver switches to 22.5792 MHz
+ * for 44.1 kHz by calling clk_set_rate() on clk_mcasp0.
+ *
+ * clk_mcasp0: gpio-gate-clock — gates the fixed clock via GPIO1_27.
+ * The gate must be asserted (GPIO high) before any audio operation.
+ * -------------------------------------------------------------------------- */
+&{/} {
+	clk_mcasp0_fixed: clk_mcasp0_fixed {
+		#clock-cells = <0>;
+		compatible = "fixed-clock";
+		clock-frequency = <24576000>;
+	};
+
+	clk_mcasp0: clk_mcasp0 {
+		#clock-cells = <0>;
+		compatible = "gpio-gate-clock";
+		clocks = <&clk_mcasp0_fixed>;
+		enable-gpios = <&gpio1 27 GPIO_ACTIVE_HIGH>;
+	};
+};
+
+/* --------------------------------------------------------------------------
+ * Pin multiplexing
+ *
+ * ACLKX (0x990) — BCLK.    INPUT because AIC3104 is clock master.
+ * FSX   (0x994) — FSYNC.   INPUT because AIC3104 is clock master.
+ * AXR0  (0x998) — Serial data RX (capture from AIC3104).
+ * AXR2  (0x99c) — Serial data TX to AIC3104 (MUX_MODE2 = mcasp0_axr2).
+ * AHCLKX(0x9ac) — MCLK output to both codecs.
+ * GPIO1_27(0x86c)— Gate for clk_mcasp0.
+ * AXR3  (0x9a4) — Serial data TX to ES9080Q (MUX_MODE3 = mcasp0_axr3).
+ *
+ * ACLKX and FSX use PIN_INPUT because the McASP is a clock slave — it
+ * receives BCLK and FSYNC from the AIC3104, not the other way around.
+ * -------------------------------------------------------------------------- */
+&am33xx_pinmux {
+	bone_audio_cape_audio_pins: pinmux_bone_audio_cape_audio_pins {
+		pinctrl-single,pins = <
+			/* BCLK — input, McASP is clock slave */
+			AM33XX_IOPAD(0x990, PIN_INPUT_PULLDOWN | MUX_MODE0)
+			/* FSYNC — input, McASP is clock slave */
+			AM33XX_IOPAD(0x994, PIN_INPUT_PULLDOWN | MUX_MODE0)
+			/* AXR0 — RX, capture from AIC3104 */
+			AM33XX_IOPAD(0x998, PIN_INPUT_PULLDOWN | MUX_MODE0)
+			/* AXR2 — TX, playback to AIC3104 (mcasp0_axr2) */
+			AM33XX_IOPAD(0x99c, PIN_OUTPUT_PULLDOWN | MUX_MODE2)
+			/* AHCLKX — MCLK output to both codecs */
+			AM33XX_IOPAD(0x9ac, PIN_OUTPUT_PULLDOWN | MUX_MODE0)
+			/* GPIO1_27 — MCLK gate enable */
+			AM33XX_IOPAD(0x86c, PIN_OUTPUT_PULLDOWN | MUX_MODE7)
+			/* AXR3 — TX, playback to ES9080Q (mcasp0_axr3) */
+			AM33XX_IOPAD(0x9a4, PIN_OUTPUT_PULLDOWN | MUX_MODE3)
+		>;
+	};
+};
+
+/* --------------------------------------------------------------------------
+ * Disable default BeagleBone pin multiplexing for the pins we use above
+ * -------------------------------------------------------------------------- */
+&ocp {
+	P9_25_pinmux { status = "disabled"; };	/* mcasp0_ahclkx  — MCLK out    */
+	P9_28_pinmux { status = "disabled"; };	/* mcasp0_axr2    — TX AIC3104  */
+	P9_29_pinmux { status = "disabled"; };	/* mcasp0_fsx     — FSYNC in    */
+	P9_30_pinmux { status = "disabled"; };	/* mcasp0_axr0    — RX          */
+	P9_31_pinmux { status = "disabled"; };	/* mcasp0_aclkx   — BCLK in     */
+	P8_33_pinmux { status = "disabled"; };	/* mcasp0_axr3    — TX ES9080Q  */
+};
+
+/* --------------------------------------------------------------------------
+ * I2C codec nodes
+ * -------------------------------------------------------------------------- */
+&i2c2 {
+	#address-cells = <1>;
+	#size-cells = <0>;
+	status = "okay";
+
+	tlv320aic3104: codec@18 {
+		compatible = "ti,tlv320aic3104";
+		reg = <0x18>;
+		#sound-dai-cells = <0>;
+		/*
+		 * AIC3104 uses MCLK as its PLL reference.  The clock is gated
+		 * by clk_mcasp0 and must be running before the codec is used.
+		 */
+		clocks = <&clk_mcasp0>;
+		clock-names = "mclk";
+	};
+
+	es9080q: dac@48 {
+		compatible = "ess,es9080q";
+		reg = <0x48>;
+		#sound-dai-cells = <0>;
+		/*
+		 * write-only-addr: ES9080Q secondary I2C address used for
+		 * write-only PLL/GPIO registers.  The driver creates a dummy
+		 * I2C client at this address on the same adapter.
+		 */
+		write-only-addr = <0x4c>;
+		/*
+		 * Reset pin is active-low (RSTN).  Driver asserts low then
+		 * releases high before starting I2C initialisation.
+		 */
+		reset-gpios = <&gpio0 11 GPIO_ACTIVE_LOW>;
+	};
+};
+
+/* --------------------------------------------------------------------------
+ * McASP0 — TDM serial bus, clock slave
+ *
+ * op-mode = 0       MCASP_IIS_MODE (TDM)
+ * tdm-slots = 16    16 slots per frame × 32 bits = 512-bit frame
+ *
+ * serial-dir layout (indices 0..15 map to AXR0..AXR15):
+ *   AXR0 = 2 (RX) — capture from AIC3104
+ *   AXR1 = 0 (INACTIVE)
+ *   AXR2 = 1 (TX) — playback to AIC3104 (slots 0-1)
+ *   AXR3 = 1 (TX) — playback to ES9080Q (slots 2-9)
+ *   AXR4-AXR15 = 0 (INACTIVE)
+ *
+ * McASP is a clock slave: ACLKX and FSX are inputs driven by AIC3104.
+ * The rx-clk-active and tx-clk-active properties are therefore not set
+ * to "master" — the default (slave) is correct.
+ * -------------------------------------------------------------------------- */
+&mcasp0 {
+	#sound-dai-cells = <0>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&bone_audio_cape_audio_pins>;
+	status = "okay";
+
+	op-mode = <0>;		/* MCASP_IIS_MODE */
+	tdm-slots = <16>;
+	num-serializer = <16>;
+	serial-dir = <		/* 0: INACTIVE, 1: TX, 2: RX */
+		2 0 1 1		/* AXR0=RX  AXR1=off  AXR2=TX(AIC)  AXR3=TX(ES9080Q) */
+		0 0 0 0
+		0 0 0 0
+		0 0 0 0
+	>;
+	tx-num-evt = <32>;
+	rx-num-evt = <32>;
+};
+
+/* --------------------------------------------------------------------------
+ * Sound card
+ *
+ * audio-routing connects machine-level board widgets (defined in the machine
+ * driver's bela_dapm_widgets[]) to codec pin widgets.
+ *
+ * ES9080Q routes use "OUT1"-"OUT8" — the SND_SOC_DAPM_OUTPUT names from
+ * es9080q.c.  Routing to the stream name "Playback" is incorrect.
+ *
+ * status = "okay" is intentionally omitted — it is a base DT property not
+ * defined by the bela,audio-cape binding and need not appear here.
+ * -------------------------------------------------------------------------- */
+&{/} {
+	sound {
+		compatible = "bela,audio-cape";
+		model = "Bela Audio Cape RevC";
+
+		cpu-dai     = <&mcasp0>;
+		aic3104-codec = <&tlv320aic3104>;
+		es9080q-codec = <&es9080q>;
+
+		clocks      = <&clk_mcasp0>;
+		clock-names = "mclk";
+
+		audio-routing =
+			/* AIC3104 outputs → board connectors */
+			"Headphone Jack",   "HPLOUT",
+			"Headphone Jack",   "HPROUT",
+			"AIC3104 Line Out", "LLOUT",
+			"AIC3104 Line Out", "RLOUT",
+			/* Board connectors → AIC3104 inputs */
+			"LINE1L",           "Line In",
+			"LINE1R",           "Line In",
+			/* ES9080Q codec pins → board connectors */
+			"DAC Out 1",        "OUT1",
+			"DAC Out 2",        "OUT2",
+			"DAC Out 3",        "OUT3",
+			"DAC Out 4",        "OUT4",
+			"DAC Out 5",        "OUT5",
+			"DAC Out 6",        "OUT6",
+			"DAC Out 7",        "OUT7",
+			"DAC Out 8",        "OUT8";
+	};
+};
