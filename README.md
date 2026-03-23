@@ -11,80 +11,7 @@ The codebase currently includes:
 * AM335x DTS (used as reference only)
 * Initial devicetree bindings for both codecs
 
-Reference: 
 
----
-
-## Implemented Components
-
-### 1. ES9080Q Codec Driver
-
-* Fully implemented ALSA SoC codec driver
-* Features:
-
-  * I2C communication including write-only address handling
-  * 8-channel DAC support via TDM
-  * Per-channel volume control (`SOC_SINGLE_EXT`)
-* Designed for multi-codec TDM systems
-
-Status:
-Functionally complete. Needs validation on real hardware.
-
----
-
-### 2. Machine Driver (`bela_cape.c`)
-
-Defines the intended audio topology:
-
-```
-AXR3 → TLV320AIC3106 → slots 0–1
-AXR2 → ES9080Q       → slots 2–9
-```
-
-Includes:
-
-* Multi-codec DAI links
-* TDM slot separation logic
-* MCLK switching based on sample rate
-* Basic DAPM routing
-
-Limitation:
-
-* Written for AM335x McASP
-* Not compatible with AM62x without modification
-
----
-
-### 3. Device Tree (Reference Only)
-
-`BB-BONE-BELA-REVC-00A0.dts`:
-
-* Describes working system on AM335x
-* Used to understand:
-
-  * McASP configuration
-  * Codec routing
-  * Clocking assumptions
-
-Not usable on PocketBeagle 2.
-
----
-
-## Architecture (Intended)
-
-Single McASP instance with TDM split across two codecs:
-
-```
-McASP0 (TDM bus)
-
-  slots 0–1  → AIC3106 (2-channel ADC/DAC)
-  slots 2–9  → ES9080Q (8-channel DAC)
-```
-
-Key point:
-This is not mixing. It is strict slot partitioning on the same TDM stream.
-
----
 
 ## Current Gaps
 
@@ -143,26 +70,6 @@ Codec:
 * TLV320AIC3106 (not AIC3104)
 * ES9080Q
 
----
-
-## Critical Assumptions (Unverified)
-
-1. Codec is clock master
-
-   * McASP receives BCLK + FSYNC
-
-2. TDM slot mapping is valid
-
-   * AXR3 → slots 0–1
-   * AXR2 → slots 2–9
-
-3. MCLK is available
-
-   * AHCLKX source not identified
-
-If any of these are wrong, audio will fail even if the driver is correct.
-
----
 
 ## Immediate Next Steps
 
