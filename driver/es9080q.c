@@ -4,6 +4,7 @@
  */
 
 #include <linux/init.h>
+#include <linux/log2.h>
 #include <linux/i2c.h>
 #include <linux/module.h>
 #include <linux/regmap.h>
@@ -17,7 +18,6 @@
 #include <sound/core.h>
 #include <sound/pcm.h>
 #include <linux/regulator/consumer.h>
-#include "es9080q.h"
 
 /* ES9080Q constants from C++ implementation */
 #define ES9080Q_NUM_BITS         256
@@ -307,11 +307,15 @@ static int es9080q_configure_clocking(struct es9080q_priv *priv,
 	divide_value_menc = mclk_over_bck /
 			    (master_bck_div1 ? 1 : (is16bit ? 4 : 2));
 	ws_scale_factor   = mclk_over_ws / (divide_value_menc * 128);
-	master_ws_scale   = __builtin_ctz(ws_scale_factor);
+	if (!is_power_of_2(ws_scale_factor)) {
+		dev_err(&priv->rw_client->dev,
+			"Invalid WS scale factor %u\n", ws_scale_factor);
+		return -EINVAL;
+	}
 
-	if (!ws_scale_factor ||
-	    (ws_scale_factor & ~(1 << master_ws_scale)) ||
-	    master_ws_scale > 4) {
+	master_ws_scale = ilog2(ws_scale_factor);
+
+	if (master_ws_scale > 4) {
 		dev_err(&priv->rw_client->dev,
 			"Invalid WS scale factor %u\n", ws_scale_factor);
 		return -EINVAL;
@@ -658,10 +662,6 @@ static int es9080q_set_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 
 	/* ES9080Q uses TDM/DSP mode internally */
 	switch (fmt & SND_SOC_DAIFMT_FORMAT_MASK) {
-	case SND_SOC_DAIFMT_I2S:
-		dev_warn(component->dev,
-			 "I2S format requested, but ES9080Q uses TDM internally\n");
-		fallthrough;
 	case SND_SOC_DAIFMT_DSP_A:
 	case SND_SOC_DAIFMT_DSP_B:
 		break;
@@ -692,6 +692,9 @@ static int es9080q_set_sysclk(struct snd_soc_dai *dai, int clk_id,
 {
 	struct snd_soc_component *component = dai->component;
 	struct es9080q_priv *priv = snd_soc_component_get_drvdata(component);
+
+	if (!freq)
+		return -EINVAL;
 
 	dev_dbg(component->dev, "ES9080Q set_sysclk: freq=%u\n", freq);
 	priv->sysclk_freq = freq;
@@ -740,16 +743,37 @@ static int es9080q_set_tdm_slot(struct snd_soc_dai *dai,
 		}
 	}
 
-	if (active_slots > ES9080Q_NUM_OUT_CHANNELS) {
-		dev_err(component->dev,
-			"Too many active slots (%d), max is %d\n",
-			active_slots, ES9080Q_NUM_OUT_CHANNELS);
+	if (rx_mask) {
+		dev_err(component->dev, "RX slots not supported on ES9080Q\n");
 		return -EINVAL;
 	}
 
-	if (slot_width != 16 && slot_width != 24 && slot_width != 32) {
-		dev_err(component->dev, "Unsupported slot width %d\n",
-			slot_width);
+	if (slots != 16 || slot_width != 32) {
+		dev_err(component->dev,
+			"Only 16-slot/32-bit TDM mode supported in v1\n");
+		return -EINVAL;
+	}
+
+	if (active_slots != ES9080Q_NUM_OUT_CHANNELS) {
+		dev_err(component->dev,
+			"Need exactly %d TX slots, got %d\n",
+			ES9080Q_NUM_OUT_CHANNELS, active_slots);
+		return -EINVAL;
+	}
+
+	if (first_slot < 0 ||
+	    first_slot > (slots - ES9080Q_NUM_OUT_CHANNELS)) {
+		dev_err(component->dev,
+			"Invalid first slot %d for %d slots\n",
+			first_slot, slots);
+		return -EINVAL;
+	}
+
+	if ((tx_mask & GENMASK(slots - 1, 0)) !=
+	    GENMASK(first_slot + ES9080Q_NUM_OUT_CHANNELS - 1, first_slot)) {
+		dev_err(component->dev,
+			"TX slots must be contiguous (mask=0x%x)\n",
+			tx_mask);
 		return -EINVAL;
 	}
 
@@ -920,7 +944,7 @@ static int es9080q_volume_get(struct snd_kcontrol *kcontrol,
 			      struct snd_ctl_elem_value *ucontrol)
 {
 	struct snd_soc_component *component =
-		snd_soc_kcontrol_component(kcontrol);
+		snd_kcontrol_chip(kcontrol);
 	struct es9080q_priv *priv = snd_soc_component_get_drvdata(component);
 	struct soc_mixer_control *mc =
 		(struct soc_mixer_control *)kcontrol->private_value;
@@ -937,7 +961,7 @@ static int es9080q_volume_put(struct snd_kcontrol *kcontrol,
 			      struct snd_ctl_elem_value *ucontrol)
 {
 	struct snd_soc_component *component =
-		snd_soc_kcontrol_component(kcontrol);
+		snd_kcontrol_chip(kcontrol);
 	struct es9080q_priv *priv = snd_soc_component_get_drvdata(component);
 	struct soc_mixer_control *mc =
 		(struct soc_mixer_control *)kcontrol->private_value;
@@ -1097,6 +1121,11 @@ static int es9080q_i2c_probe(struct i2c_client *rw_client)
 	if (ret) {
 		dev_err(dev, "Missing write-only-addr property\n");
 		return ret;
+	}
+
+	if (wo_addr > 0x7f || wo_addr == rw_client->addr) {
+		dev_err(dev, "Invalid write-only-addr 0x%x\n", wo_addr);
+		return -EINVAL;
 	}
 
 	/* Create write-only dummy client on the same adapter */

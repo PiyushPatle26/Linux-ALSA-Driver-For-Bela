@@ -17,7 +17,6 @@
 
 #include <linux/clk.h>
 #include <linux/device.h>
-#include <linux/gpio/consumer.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
@@ -420,6 +419,8 @@ static int bela_probe(struct platform_device *pdev)
 	if (!priv)
 		return -ENOMEM;
 
+	platform_set_drvdata(pdev, priv);
+
 	/* Parse DT phandles */
 	cpu_node     = of_parse_phandle(np, "cpu-dai",       0);
 	aic3104_node = of_parse_phandle(np, "aic3104-codec", 0);
@@ -448,7 +449,7 @@ static int bela_probe(struct platform_device *pdev)
 	of_node_put(es9080q_node);
 	cpu_node = aic3104_node = es9080q_node = NULL;
 
-	/* Get MCLK; enable at default 48 kHz family rate */
+	/* Get MCLK; required by bela,audio-cape binding */
 	priv->mclk = devm_clk_get(dev, "mclk");
 	if (IS_ERR(priv->mclk)) {
 		ret = PTR_ERR(priv->mclk);
@@ -500,6 +501,14 @@ static int bela_probe(struct platform_device *pdev)
 	priv->card.controls         = bela_controls;
 	priv->card.num_controls     = ARRAY_SIZE(bela_controls);
 
+	ret = snd_soc_of_parse_card_name(&priv->card, "model");
+	if (ret && ret != -EINVAL)
+		dev_warn(dev, "Failed to parse card model: %d\n", ret);
+
+	ret = snd_soc_of_parse_audio_routing(&priv->card, "audio-routing");
+	if (ret && ret != -EINVAL)
+		dev_warn(dev, "Failed to parse audio-routing: %d\n", ret);
+
 	snd_soc_card_set_drvdata(&priv->card, priv);
 
 	ret = devm_snd_soc_register_card(dev, &priv->card);
@@ -509,7 +518,8 @@ static int bela_probe(struct platform_device *pdev)
 		else
 			dev_err(dev, "Failed to register sound card: %d\n",
 				ret);
-		clk_disable_unprepare(priv->mclk);
+		if (priv->mclk)
+			clk_disable_unprepare(priv->mclk);
 		return ret;
 	}
 
@@ -542,7 +552,7 @@ static void bela_remove(struct platform_device *pdev)
 	 * devm_snd_soc_register_card is already torn down before remove()
 	 * is called, so all streams are already stopped.  Just gate the clock.
 	 */
-	if (priv->mclk)
+	if (priv && priv->mclk)
 		clk_disable_unprepare(priv->mclk);
 
 	dev_info(&pdev->dev, "Bela sound card removed\n");

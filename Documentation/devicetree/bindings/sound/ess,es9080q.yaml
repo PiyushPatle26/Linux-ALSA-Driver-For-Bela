@@ -12,16 +12,10 @@ maintainers:
   - Piyush Patle <piyushpatle1228@gmail.com>
 
 description: |
-  The ES9080Q is an 8-channel audio DAC supporting TDM (Time Division
-  Multiplexed) operation with up to 16 time slots. Register control is
-  via I2C; audio data arrives via TDM.
-
-  The chip exposes two I2C addresses on the same bus:
-    - Primary (0x48): read/write registers for audio configuration
-    - Secondary (0x4C): write-only registers for PLL reset and GPIO control
-
-  The secondary address is specified via the write-only-addr property and
-  is managed internally by the driver as a dummy I2C client.
+  The ES9080Q is an 8-channel audio DAC with TDM input (up to 16 slots).
+  Register control is via I2C. The chip exposes two I2C addresses:
+    - Primary (0x48):  read/write registers for audio configuration
+    - Secondary (0x4C): write-only registers for PLL/GPIO control
 
 allOf:
   - $ref: /schemas/sound/audio-dai.yaml#
@@ -37,21 +31,29 @@ properties:
   write-only-addr:
     $ref: /schemas/types.yaml#/definitions/uint32
     description: |
-      I2C address of the write-only register interface (0x4C).
-      The ES9080Q exposes two I2C addresses on the same adapter — one for
-      general read/write registers and one for write-only PLL and GPIO
-      configuration registers. This property is required because the driver
-      must create a separate dummy I2C client for that address.
+      I2C address of the write-only register interface (0x4C). The driver
+      creates a dummy I2C client at this address on the same adapter for
+      PLL and GPIO register access.
 
   reset-gpios:
     maxItems: 1
     description: |
-      GPIO connected to the active-low hardware reset pin (RSTN).
-      The driver asserts reset for ES9080Q_RESET_ASSERT_US microseconds
-      then releases it before beginning I2C initialisation.
+      Optional GPIO connected to the active-low hardware reset pin (RSTN).
+      Omit on boards where ES9080Q reset is tied to the board-level reset
+      domain rather than a dedicated Linux-controlled GPIO.
 
   "#sound-dai-cells":
     const: 0
+
+  clocks:
+    maxItems: 1
+    items:
+      - description: Master clock (MCLK) input.
+
+  clock-names:
+    maxItems: 1
+    items:
+      - const: mclk
 
 required:
   - compatible
@@ -64,7 +66,6 @@ additionalProperties: false
 examples:
   - |
     #include <dt-bindings/gpio/gpio.h>
-
     i2c {
         #address-cells = <1>;
         #size-cells = <0>;
