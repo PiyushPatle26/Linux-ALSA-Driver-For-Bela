@@ -5,14 +5,14 @@
  * 10 outputs (2 from AIC3104 + 8 from ES9080Q) + 2 inputs (from AIC3104)
  *
  * Clock architecture:
- *   AIC3104  — BCLK + FSYNC master (CBP_CFP)
- *   McASP    — BCLK + FSYNC slave  (CBC_CFC)
- *   ES9080Q  — BCLK + FSYNC slave  (CBC_CFC)
+ *   AIC3104  --BCLK + FSYNC master (CBP_CFP)
+ *   McASP    --BCLK + FSYNC slave  (CBC_CFC)
+ *   ES9080Q  --BCLK + FSYNC slave  (CBC_CFC)
  *
  * TDM slot allocation (16 slots × 32 bits):
- *   Slots  0–1  : TLV320AIC3104 (tx_mask=0x0003, rx_mask=0x0003)
- *   Slots  2–9  : ES9080Q       (tx_mask=0x03FC)
- *   Slots 10–15 : Reserved
+ *   Slots  0-1  : TLV320AIC3104 (tx_mask=0x0003, rx_mask=0x0003)
+ *   Slots  2-9  : ES9080Q       (tx_mask=0x03FC)
+ *   Slots 10-15 : Reserved
  */
 
 #include <linux/clk.h>
@@ -38,9 +38,7 @@ struct bela_priv {
 	unsigned int mclk_freq;   /* Currently programmed MCLK rate */
 };
 
-/* --------------------------------------------------------------------------
- * Sample rate helpers
- * -------------------------------------------------------------------------- */
+/* Sample rate helpers */
 
 static const unsigned int bela_rates[] = {
 	44100, 48000, 88200, 96000,
@@ -70,9 +68,7 @@ static unsigned int bela_get_mclk_rate(unsigned int rate)
 	}
 }
 
-/* --------------------------------------------------------------------------
- * PCM ops
- * -------------------------------------------------------------------------- */
+/* PCM ops */
 
 /**
  * bela_startup - Apply rate and channel constraints when a stream opens
@@ -103,7 +99,7 @@ static int bela_startup(struct snd_pcm_substream *substream)
 				ret);
 			return ret;
 		}
-		dev_dbg(rtd->dev, "Playback: 1–%d channels\n", BELA_OUTPUTS);
+		dev_dbg(rtd->dev, "Playback: 1-%d channels\n", BELA_OUTPUTS);
 	} else {
 		ret = snd_pcm_hw_constraint_minmax(runtime,
 						   SNDRV_PCM_HW_PARAM_CHANNELS,
@@ -114,7 +110,7 @@ static int bela_startup(struct snd_pcm_substream *substream)
 				ret);
 			return ret;
 		}
-		dev_dbg(rtd->dev, "Capture: 1–%d channels\n", BELA_INPUTS);
+		dev_dbg(rtd->dev, "Capture: 1-%d channels\n", BELA_INPUTS);
 	}
 
 	return 0;
@@ -146,7 +142,7 @@ static int bela_hw_params(struct snd_pcm_substream *substream,
 	if (!priv->mclk || mclk_freq == priv->mclk_freq)
 		return 0;
 
-	dev_dbg(card->dev, "Switching MCLK: %u → %u Hz for rate %u\n",
+	dev_dbg(card->dev, "Switching MCLK: %u -> %u Hz for rate %u\n",
 		priv->mclk_freq, mclk_freq, rate);
 
 	clk_disable_unprepare(priv->mclk);
@@ -181,9 +177,7 @@ static const struct snd_soc_ops bela_ops = {
 	.hw_params = bela_hw_params,
 };
 
-/* --------------------------------------------------------------------------
- * DAPM
- * -------------------------------------------------------------------------- */
+/* DAPM widgets, routes, and controls */
 
 static const struct snd_soc_dapm_widget bela_dapm_widgets[] = {
 	/* AIC3104 outputs */
@@ -194,7 +188,7 @@ static const struct snd_soc_dapm_widget bela_dapm_widgets[] = {
 	SND_SOC_DAPM_LINE("Line In", NULL),
 	SND_SOC_DAPM_MIC("Mic In", NULL),
 
-	/* ES9080Q board output connectors (channels 3–10) */
+	/* ES9080Q board output connectors (channels 3-10) */
 	SND_SOC_DAPM_OUTPUT("DAC Out 1"),
 	SND_SOC_DAPM_OUTPUT("DAC Out 2"),
 	SND_SOC_DAPM_OUTPUT("DAC Out 3"),
@@ -212,7 +206,7 @@ static const struct snd_soc_dapm_widget bela_dapm_widgets[] = {
  *
  * For ES9080Q: the machine-level "DAC Out N" board widgets connect to the
  * codec's "OUTN" SND_SOC_DAPM_OUTPUT pins defined in es9080q.c.  Routing to
- * the stream name "Playback" is incorrect — stream names are not widget names.
+ * the stream name "Playback" is incorrect --stream names are not widget names.
  */
 static const struct snd_soc_dapm_route bela_dapm_routes[] = {
 	/* AIC3104 output routing */
@@ -227,7 +221,7 @@ static const struct snd_soc_dapm_route bela_dapm_routes[] = {
 
 	/*
 	 * ES9080Q output routing
-	 * "OUT1"–"OUT8" are the SND_SOC_DAPM_OUTPUT widget names in es9080q.c.
+	 * "OUT1"-"OUT8" are the SND_SOC_DAPM_OUTPUT widget names in es9080q.c.
 	 */
 	{ "DAC Out 1", NULL, "OUT1" },
 	{ "DAC Out 2", NULL, "OUT2" },
@@ -254,29 +248,26 @@ static const struct snd_kcontrol_new bela_controls[] = {
 	SOC_DAPM_PIN_SWITCH("DAC Out 8"),
 };
 
-/* --------------------------------------------------------------------------
- * DAI link init — all static DAI configuration lives here
- * --------------------------------------------------------------------------
+/*
+ * DAI link init -- all static DAI configuration lives here
  *
- * Clock master assignment (per mentor guidance):
- *
+ * Clock master assignment:
  *   AIC3104 is the BCLK/FSYNC master.  It generates 256 clocks per frame
  *   derived from its own MCLK PLL.  Both the McASP (CPU DAI) and the ES9080Q
  *   receive the clock passively.
  *
- *   McASP  (CPU DAI) → SND_SOC_DAIFMT_CBC_CFC  (clock+frame consumer/slave)
- *   AIC3104           → SND_SOC_DAIFMT_CBP_CFP  (clock+frame provider/master)
- *   ES9080Q           → SND_SOC_DAIFMT_CBC_CFC  (clock+frame consumer/slave)
+ *   McASP  (CPU DAI) = SND_SOC_DAIFMT_CBC_CFC  (clock+frame consumer/slave)
+ *   AIC3104          = SND_SOC_DAIFMT_CBP_CFP  (clock+frame provider/master)
+ *   ES9080Q          = SND_SOC_DAIFMT_CBC_CFC  (clock+frame consumer/slave)
  *
- * This function is called once by ASoC after all components are bound.
- * Do NOT repeat these calls in hw_params — they are one-time configuration.
+ * Called once by ASoC after all components are bound.
  */
 static int bela_init(struct snd_soc_pcm_runtime *rtd)
 {
 	struct snd_soc_card *card = rtd->card;
 	struct bela_priv *priv = snd_soc_card_get_drvdata(card);
 	struct snd_soc_dai *cpu_dai     = snd_soc_rtd_to_cpu(rtd, 0);
-	/* Access by index — matches the order in priv->codecs[] */
+	/* Access by index --matches the order in priv->codecs[] */
 	struct snd_soc_dai *aic3104_dai = snd_soc_rtd_to_codec(rtd, 0);
 	struct snd_soc_dai *es9080q_dai = snd_soc_rtd_to_codec(rtd, 1);
 	int ret;
@@ -285,9 +276,7 @@ static int bela_init(struct snd_soc_pcm_runtime *rtd)
 		 "Bela init: cpu=%s aic3104=%s es9080q=%s\n",
 		 cpu_dai->name, aic3104_dai->name, es9080q_dai->name);
 
-	/* ------------------------------------------------------------------
-	 * 1. McASP (CPU DAI) — clock slave, receives BCLK/FSYNC from AIC3104
-	 * ------------------------------------------------------------------ */
+	/* 1. McASP (CPU DAI) -- clock slave, receives BCLK/FSYNC from AIC3104 */
 	ret = snd_soc_dai_set_fmt(cpu_dai,
 				  SND_SOC_DAIFMT_DSP_B    |
 				  SND_SOC_DAIFMT_IB_NF    |
@@ -297,9 +286,17 @@ static int bela_init(struct snd_soc_pcm_runtime *rtd)
 		return ret;
 	}
 
-	/* ------------------------------------------------------------------
-	 * 2. TLV320AIC3104 — clock master, drives BCLK + FSYNC
-	 * ------------------------------------------------------------------ */
+	/* McASP: all 16 TDM slots, TX slots 0-9, RX slots 0-1 */
+	ret = snd_soc_dai_set_tdm_slot(cpu_dai,
+				       0x03FF,  /* TX: slots 0-9 */
+				       0x0003,  /* RX: slots 0-1 */
+				       TDM_SLOTS, TDM_SLOT_WIDTH);
+	if (ret) {
+		dev_err(card->dev, "Failed to set CPU TDM slots: %d\n", ret);
+		return ret;
+	}
+
+	/* 2. TLV320AIC3104 -- clock master, drives BCLK + FSYNC */
 	ret = snd_soc_dai_set_fmt(aic3104_dai,
 				  SND_SOC_DAIFMT_DSP_B    |
 				  SND_SOC_DAIFMT_IB_NF    |
@@ -317,7 +314,7 @@ static int bela_init(struct snd_soc_pcm_runtime *rtd)
 		return ret;
 	}
 
-	/* AIC3104 owns TDM slots 0–1 for both TX and RX */
+	/* AIC3104 owns TDM slots 0-1 for both TX and RX */
 	ret = snd_soc_dai_set_tdm_slot(aic3104_dai,
 				       0x0003, 0x0003,
 				       TDM_SLOTS, TDM_SLOT_WIDTH);
@@ -327,9 +324,7 @@ static int bela_init(struct snd_soc_pcm_runtime *rtd)
 		return ret;
 	}
 
-	/* ------------------------------------------------------------------
-	 * 3. ES9080Q — clock slave, receives BCLK/FSYNC from AIC3104
-	 * ------------------------------------------------------------------ */
+	/* 3. ES9080Q -- clock slave, receives BCLK/FSYNC from AIC3104 */
 	ret = snd_soc_dai_set_fmt(es9080q_dai,
 				  SND_SOC_DAIFMT_DSP_B    |
 				  SND_SOC_DAIFMT_IB_NF    |
@@ -341,7 +336,7 @@ static int bela_init(struct snd_soc_pcm_runtime *rtd)
 
 	/*
 	 * ES9080Q uses MCLK (not BCLK) as its sysclk reference for internal
-	 * PLL and divider calculations — see es9080q_configure_clocking().
+	 * PLL and divider calculations --see es9080q_configure_clocking().
 	 */
 	ret = snd_soc_dai_set_sysclk(es9080q_dai, 0, priv->mclk_freq,
 				     SND_SOC_CLOCK_IN);
@@ -350,7 +345,7 @@ static int bela_init(struct snd_soc_pcm_runtime *rtd)
 		return ret;
 	}
 
-	/* ES9080Q owns TDM slots 2–9 for TX; no RX (DAC only) */
+	/* ES9080Q owns TDM slots 2-9 for TX; no RX (DAC only) */
 	ret = snd_soc_dai_set_tdm_slot(es9080q_dai,
 				       0x03FC, 0x0000,
 				       TDM_SLOTS, TDM_SLOT_WIDTH);
@@ -360,21 +355,19 @@ static int bela_init(struct snd_soc_pcm_runtime *rtd)
 		return ret;
 	}
 
-	/* ------------------------------------------------------------------
-	 * 4. Enable all board-level output pins by default
-	 * ------------------------------------------------------------------ */
-	snd_soc_dapm_enable_pin(&card->dapm, "Headphone Jack");
-	snd_soc_dapm_enable_pin(&card->dapm, "AIC3104 Line Out");
-	snd_soc_dapm_enable_pin(&card->dapm, "Line In");
-	snd_soc_dapm_enable_pin(&card->dapm, "Mic In");
-	snd_soc_dapm_enable_pin(&card->dapm, "DAC Out 1");
-	snd_soc_dapm_enable_pin(&card->dapm, "DAC Out 2");
-	snd_soc_dapm_enable_pin(&card->dapm, "DAC Out 3");
-	snd_soc_dapm_enable_pin(&card->dapm, "DAC Out 4");
-	snd_soc_dapm_enable_pin(&card->dapm, "DAC Out 5");
-	snd_soc_dapm_enable_pin(&card->dapm, "DAC Out 6");
-	snd_soc_dapm_enable_pin(&card->dapm, "DAC Out 7");
-	snd_soc_dapm_enable_pin(&card->dapm, "DAC Out 8");
+	/* 4. Enable all board-level output pins by default */
+	snd_soc_dapm_enable_pin(snd_soc_card_to_dapm(card), "Headphone Jack");
+	snd_soc_dapm_enable_pin(snd_soc_card_to_dapm(card), "AIC3104 Line Out");
+	snd_soc_dapm_enable_pin(snd_soc_card_to_dapm(card), "Line In");
+	snd_soc_dapm_enable_pin(snd_soc_card_to_dapm(card), "Mic In");
+	snd_soc_dapm_enable_pin(snd_soc_card_to_dapm(card), "DAC Out 1");
+	snd_soc_dapm_enable_pin(snd_soc_card_to_dapm(card), "DAC Out 2");
+	snd_soc_dapm_enable_pin(snd_soc_card_to_dapm(card), "DAC Out 3");
+	snd_soc_dapm_enable_pin(snd_soc_card_to_dapm(card), "DAC Out 4");
+	snd_soc_dapm_enable_pin(snd_soc_card_to_dapm(card), "DAC Out 5");
+	snd_soc_dapm_enable_pin(snd_soc_card_to_dapm(card), "DAC Out 6");
+	snd_soc_dapm_enable_pin(snd_soc_card_to_dapm(card), "DAC Out 7");
+	snd_soc_dapm_enable_pin(snd_soc_card_to_dapm(card), "DAC Out 8");
 
 	dev_info(card->dev,
 		 "Bela init complete: AIC3104=master, McASP+ES9080Q=slave\n");
@@ -382,12 +375,10 @@ static int bela_init(struct snd_soc_pcm_runtime *rtd)
 		 "TDM: AIC3104=slots 0-1, ES9080Q=slots 2-9, MCLK=%u Hz\n",
 		 priv->mclk_freq);
 
-	return 0;
+	return snd_soc_dapm_sync(snd_soc_card_to_dapm(card));
 }
 
-/* --------------------------------------------------------------------------
- * Platform driver probe / remove
- * -------------------------------------------------------------------------- */
+/* Platform driver probe / remove */
 
 /**
  * bela_probe - Initialise the Bela Audio Cape sound card
@@ -427,12 +418,12 @@ static int bela_probe(struct platform_device *pdev)
 	es9080q_node = of_parse_phandle(np, "es9080q-codec", 0);
 
 	if (!cpu_node || !aic3104_node || !es9080q_node) {
-		dev_err(dev, "Missing cpu-dai, aic3104-codec or es9080q-codec in DT\n");
-		ret = -EINVAL;
+		ret = dev_err_probe(dev, -EINVAL,
+				    "Missing cpu-dai, aic3104-codec or es9080q-codec in DT\n");
 		goto err_put_nodes;
 	}
 
-	/* Store of_node pointers — ASoC will take its own reference */
+	/* Store of_node pointers --ASoC will take its own reference */
 	priv->cpu.of_node       = cpu_node;
 	priv->platform.of_node  = cpu_node;
 	priv->codecs[0].of_node = aic3104_node;
@@ -441,7 +432,7 @@ static int bela_probe(struct platform_device *pdev)
 	priv->codecs[1].dai_name = "es9080q-hifi";
 
 	/*
-	 * Release our references now — ASoC holds its own from this point.
+	 * Release our references now --ASoC holds its own from this point.
 	 * Nulling the locals prevents double-put in the error path.
 	 */
 	of_node_put(cpu_node);
@@ -451,11 +442,9 @@ static int bela_probe(struct platform_device *pdev)
 
 	/* Get MCLK; required by bela,audio-cape binding */
 	priv->mclk = devm_clk_get(dev, "mclk");
-	if (IS_ERR(priv->mclk)) {
-		ret = PTR_ERR(priv->mclk);
-		dev_err(dev, "Failed to get MCLK: %d\n", ret);
-		return ret;
-	}
+	if (IS_ERR(priv->mclk))
+		return dev_err_probe(dev, PTR_ERR(priv->mclk),
+				     "Failed to get MCLK\n");
 
 	priv->mclk_freq = bela_get_mclk_rate(48000);
 	ret = clk_set_rate(priv->mclk, priv->mclk_freq);
@@ -463,12 +452,10 @@ static int bela_probe(struct platform_device *pdev)
 		dev_warn(dev, "Failed to set initial MCLK rate: %d\n", ret);
 
 	ret = clk_prepare_enable(priv->mclk);
-	if (ret) {
-		dev_err(dev, "Failed to enable MCLK: %d\n", ret);
-		return ret;
-	}
+	if (ret)
+		return dev_err_probe(dev, ret, "Failed to enable MCLK\n");
 
-	/* DAI link — single link with two codecs on shared TDM bus */
+	/* DAI link --single link with two codecs on shared TDM bus */
 	priv->dai_link.name        = "Bela Unified TDM";
 	priv->dai_link.stream_name = "Bela Multi-Channel Audio";
 	priv->dai_link.cpus        = &priv->cpu;
@@ -500,6 +487,7 @@ static int bela_probe(struct platform_device *pdev)
 	priv->card.num_dapm_routes  = ARRAY_SIZE(bela_dapm_routes);
 	priv->card.controls         = bela_controls;
 	priv->card.num_controls     = ARRAY_SIZE(bela_controls);
+	priv->card.fully_routed     = true;
 
 	ret = snd_soc_of_parse_card_name(&priv->card, "model");
 	if (ret && ret != -EINVAL)
@@ -513,14 +501,9 @@ static int bela_probe(struct platform_device *pdev)
 
 	ret = devm_snd_soc_register_card(dev, &priv->card);
 	if (ret) {
-		if (ret == -EPROBE_DEFER)
-			dev_info(dev, "Deferred — codecs not ready yet\n");
-		else
-			dev_err(dev, "Failed to register sound card: %d\n",
-				ret);
-		if (priv->mclk)
-			clk_disable_unprepare(priv->mclk);
-		return ret;
+		clk_disable_unprepare(priv->mclk);
+		return dev_err_probe(dev, ret,
+				     "Failed to register sound card\n");
 	}
 
 	dev_info(dev, "Bela sound card registered (%d outputs + %d inputs)\n",
@@ -558,9 +541,7 @@ static void bela_remove(struct platform_device *pdev)
 	dev_info(&pdev->dev, "Bela sound card removed\n");
 }
 
-/* --------------------------------------------------------------------------
- * Module boilerplate
- * -------------------------------------------------------------------------- */
+/* Module boilerplate */
 
 static const struct of_device_id bela_of_match[] = {
 	{ .compatible = "bela,audio-cape" },
@@ -570,7 +551,7 @@ MODULE_DEVICE_TABLE(of, bela_of_match);
 
 static struct platform_driver bela_driver = {
 	.probe      = bela_probe,
-	.remove_new = bela_remove,
+	.remove     = bela_remove,
 	.driver = {
 		.name           = "bela-audio-cape",
 		.of_match_table = bela_of_match,

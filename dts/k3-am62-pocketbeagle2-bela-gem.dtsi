@@ -1,0 +1,249 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * Bela Gem audio for PocketBeagle2 (AM625)
+ *
+ * Wiring verified against Bela Gem Multi rev A4:
+ *   P1.33 -> AUD_SDA
+ *   P1.36 -> AUD_SCL
+ *   P2.5  -> AUD_DOUT
+ *   P2.7  -> AUD_DIN
+ *   P2.10 -> AUD_WCLK
+ *   P2.11 -> AUD_MCLK
+ *   P2.18 -> ADC_RST#/ES9080 CHIP_EN (via bridged JP8)
+ *   P2.19 -> AUD_BCLK
+ *   P2.26 -> RESET#
+ *
+ * PocketBeagle2 expansion muxing maps these nets to:
+ *   AUD_SDA/AUD_SCL -> main_i2c1
+ *   AUD_DOUT        -> MCASP2_AXR0 (codec DOUT = SoC RX)
+ *   AUD_DIN         -> MCASP2_AXR1 (codec DIN  = SoC TX)
+ *   AUD_WCLK        -> MCASP2_AFSX
+ *   AUD_BCLK        -> MCASP2_ACLKX
+ *   AUD_MCLK        -> AUDIO_EXT_REFCLK1
+ *
+ * Power rails verified against GemMulti_rev_A4:
+ *   TLV320AIC3106 IOVDD = +3V3
+ *   TLV320AIC3106 DVDD  = +1V8 (on-board MIC5317 from +3V3)
+ *   TLV320AIC3106 AVDD  = +3.3VA (filtered from +3V3)
+ *   TLV320AIC3106 DRVDD = +3.3VA (filtered from +3V3)
+ */
+#include "k3-pinctrl.h"
+
+&{/} {
+	bela_vdda_3v3: regulator-bela-vdda-3v3 {
+		compatible = "regulator-fixed";
+		regulator-name = "bela_vdda_3v3";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		vin-supply = <&vdd_3v3>;
+		regulator-always-on;
+		regulator-boot-on;
+	};
+
+	bela_vdd_1v8: regulator-bela-vdd-1v8 {
+		compatible = "regulator-fixed";
+		regulator-name = "bela_vdd_1v8";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		vin-supply = <&vdd_3v3>;
+		regulator-always-on;
+		regulator-boot-on;
+	};
+
+	gem_simple_sound: sound {
+		compatible = "simple-audio-card";
+		simple-audio-card,name = "PocketBeagle2 Bela Gem Multi";
+		simple-audio-card,widgets =
+			"Headphone", "Headphone Jack",
+			"Line", "Line Out",
+			"Line", "Line In";
+		simple-audio-card,routing =
+			"Headphone Jack", "HPLOUT",
+			"Headphone Jack", "HPROUT",
+			"Line Out", "LLOUT",
+			"Line Out", "RLOUT",
+			"LINE1L", "Line In",
+			"LINE1R", "Line In";
+		simple-audio-card,format = "dsp_b";
+		simple-audio-card,bitclock-master = <&gem_codec_dai>;
+		simple-audio-card,frame-master = <&gem_codec_dai>;
+		simple-audio-card,bitclock-inversion;
+
+		simple-audio-card,cpu {
+			sound-dai = <&mcasp2>;
+			dai-tdm-slot-num = <2>;
+			dai-tdm-slot-width = <32>;
+		};
+
+		gem_codec_dai: simple-audio-card,codec {
+			sound-dai = <&tlv320aic3106>;
+			clocks = <&audio_refclk1>;
+			system-clock-fixed;
+			dai-tdm-slot-num = <2>;
+			dai-tdm-slot-width = <32>;
+		};
+	};
+
+	bela_sound: sound-tdm {
+		compatible = "bela,audio-cape";
+		model = "PocketBeagle2 Bela Gem";
+
+		cpu-dai = <&mcasp2>;
+		/* Legacy binding name; actual hardware is TLV320AIC3106. */
+		aic3104-codec = <&tlv320aic3106>;
+		es9080q-codec = <&es9080q>;
+
+		clocks = <&audio_refclk1>;
+		clock-names = "mclk";
+
+		audio-routing =
+			"Headphone Jack",   "HPLOUT",
+			"Headphone Jack",   "HPROUT",
+			"AIC3104 Line Out", "LLOUT",
+			"AIC3104 Line Out", "RLOUT",
+			"LINE1L",           "Line In",
+			"LINE1R",           "Line In",
+			"DAC Out 1",        "OUT1",
+			"DAC Out 2",        "OUT2",
+			"DAC Out 3",        "OUT3",
+			"DAC Out 4",        "OUT4",
+			"DAC Out 5",        "OUT5",
+			"DAC Out 6",        "OUT6",
+			"DAC Out 7",        "OUT7",
+			"DAC Out 8",        "OUT8";
+
+		status = "disabled";
+	};
+};
+
+&main_pmx0 {
+	bela_gem_i2c1_pins: bela-gem-i2c1-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x01e8, PIN_INPUT_PULLUP, 0) /* (B17) I2C1_SCL, P1.36 AUD_SCL */
+			AM62X_IOPAD(0x01ec, PIN_INPUT_PULLUP, 0) /* (A17) I2C1_SDA, P1.33 AUD_SDA */
+		>;
+	};
+
+	bela_gem_audio_pins: bela-gem-audio-pins {
+		/*
+		 * Bela Gem Multi routes audio clocking through the PB2 header:
+		 *   P2.10 -> GEM_AUD_WCLK
+		 *   P2.19 -> GEM_AUD_BCLK
+		 * Keep those header-matched pads rather than substituting other
+		 * AM62 pins that are not wired on the Gem hardware.
+		 */
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x01d8, PIN_INPUT, 8)  /* (C15) MCAN0_TX.MCASP2_AXR0, P2.5 AUD_DOUT (codec→SoC, RX) */
+			AM62X_IOPAD(0x01dc, PIN_OUTPUT, 8) /* (E15) MCAN0_RX.MCASP2_AXR1, P2.7 AUD_DIN (SoC→codec, TX) */
+			AM62X_IOPAD(0x0174, PIN_INPUT, 2)  /* (AD21) RGMII2_TD2.MCASP2_AFSX, P2.10 AUD_WCLK */
+			AM62X_IOPAD(0x0178, PIN_INPUT, 2)  /* (AC20) RGMII2_TD3.MCASP2_ACLKX, P2.19 AUD_BCLK */
+		>;
+	};
+
+	bela_gem_mclk_pins: bela-gem-mclk-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x01d4, PIN_OUTPUT, 5) /* (B15) UART0_RTSn.AUDIO_EXT_REFCLK1, P2.11 AUD_MCLK */
+		>;
+	};
+
+	bela_gem_ctrl_pins: bela-gem-ctrl-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x00d8, PIN_OUTPUT, 7) /* (V21) VOUT0_DATA8.GPIO0_53, P2.18 ADC_RST#/ES9080 CHIP_EN */
+		>;
+	};
+
+	/*
+	 * I2C pullup compensation: PB2-to-Gem cape routing has marginal signal
+	 * quality on I2C1. Enable internal pullups on neighbouring pads to
+	 * boost SCL/SDA levels, matching the Bela OS overlay (PB2-BELA.dtso).
+	 */
+	bela_gem_i2c1_pullup_sda: bela-gem-i2c1-pullup-sda-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x00e4, PIN_INPUT_PULLUP, 7) /* (AA23) VOUT0_DATA11.GPIO0_56, pullup for SDA */
+		>;
+	};
+
+	bela_gem_i2c1_pullup_scl: bela-gem-i2c1-pullup-scl-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x00e0, PIN_INPUT_PULLUP, 7) /* (V20) VOUT0_DATA10.GPIO0_55, pullup for SCL */
+		>;
+	};
+};
+
+&audio_refclk1 {
+	assigned-clock-rates = <24576000>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&bela_gem_mclk_pins>;
+};
+
+&main_gpio0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&bela_gem_ctrl_pins>;
+
+	bela_codec_enable {
+		/*
+		 * Gem Multi rev A4 ties P2.18 ADC_RST# to ES9080 CHIP_EN through
+		 * JP8. ADC_RST# is active-low, so the physical pin must be driven
+		 * high to release reset and enable the shared control line.
+		 *
+		 * Use ACTIVE_LOW + output-low so gpiolib inverts the logical low
+		 * into a raw high level on GPIO0_53 at boot. JP8 must be bridged
+		 * for this to reach the ES9080Q CHIP_EN pin.
+		 */
+		gpio-hog;
+		gpios = <53 GPIO_ACTIVE_LOW>;
+		output-low;
+		line-name = "bela-codec-enable";
+	};
+};
+
+&main_i2c1 {
+	#address-cells = <1>;
+	#size-cells = <0>;
+	status = "okay";
+	clock-frequency = <100000>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&bela_gem_i2c1_pins>, <&bela_gem_i2c1_pullup_sda>, <&bela_gem_i2c1_pullup_scl>;
+
+	tlv320aic3106: codec@18 {
+		compatible = "ti,tlv320aic3106";
+		reg = <0x18>;
+		#sound-dai-cells = <0>;
+		clocks = <&audio_refclk1>;
+		AVDD-supply = <&bela_vdda_3v3>;
+		DVDD-supply = <&bela_vdd_1v8>;
+		DRVDD-supply = <&bela_vdda_3v3>;
+		IOVDD-supply = <&vdd_3v3>;
+	};
+
+	es9080q: dac@48 {
+		compatible = "ess,es9080q";
+		reg = <0x48>;
+		#sound-dai-cells = <0>;
+		ess,write-only-addr = <0x4c>;
+		clocks = <&audio_refclk1>;
+		clock-names = "mclk";
+	};
+};
+
+&mcasp2 {
+	#sound-dai-cells = <0>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&bela_gem_audio_pins>;
+	status = "okay";
+
+	op-mode = <0>;
+	/*
+	 * Keep the controller TDM-capable for the final Bela card.
+	 * Stage 1 stereo is still constrained to 2 slots by simple-audio-card.
+	 */
+	tdm-slots = <16>;
+	serial-dir = <  /* 0: INACTIVE, 1: TX, 2: RX */
+	       2 1 0 0
+	       0 0 0 0
+	       0 0 0 0
+	       0 0 0 0
+	>;
+	tx-num-evt = <32>;
+	rx-num-evt = <32>;
+};

@@ -28,7 +28,7 @@ properties:
     maxItems: 1
     description: I2C address of the primary read/write interface (0x48).
 
-  write-only-addr:
+  ess,write-only-addr:
     $ref: /schemas/types.yaml#/definitions/uint32
     description: |
       I2C address of the write-only register interface (0x4C). The driver
@@ -58,7 +58,7 @@ properties:
 required:
   - compatible
   - reg
-  - write-only-addr
+  - ess,write-only-addr
   - "#sound-dai-cells"
 
 additionalProperties: false
@@ -74,7 +74,7 @@ examples:
             compatible = "ess,es9080q";
             reg = <0x48>;
             #sound-dai-cells = <0>;
-            write-only-addr = <0x4c>;
+            ess,write-only-addr = <0x4c>;
             reset-gpios = <&gpio0 11 GPIO_ACTIVE_LOW>;
         };
     };

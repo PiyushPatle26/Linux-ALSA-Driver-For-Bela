@@ -58,7 +58,6 @@ properties:
       receiving BCLK and FSYNC from the TLV320AIC3104.
 
   clocks:
-    minItems: 1
     maxItems: 1
     items:
       - description:
@@ -68,7 +67,6 @@ properties:
           the application selects a different sample rate.
 
   clock-names:
-    minItems: 1
     maxItems: 1
     items:
       - const: mclk
@@ -104,7 +102,7 @@ examples:
             compatible = "ess,es9080q";
             reg = <0x48>;
             #sound-dai-cells = <0>;
-            write-only-addr = <0x4c>;
+            ess,write-only-addr = <0x4c>;
             reset-gpios = <&gpio0 11 GPIO_ACTIVE_LOW>;
         };
     };
