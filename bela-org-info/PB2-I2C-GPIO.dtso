@@ -1,0 +1,54 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Copyright (C) 2022 BeagleBoard.org - https://beagleboard.org/
+ *
+ * https://docs.beagleboard.io/latest/boards/capes/cape-interface-spec.html#i2c
+ */
+
+#include <dt-bindings/gpio/gpio.h>
+#include "ti/k3-pinctrl.h"
+
+/dts-v1/;
+/plugin/;
+
+/*
+ * Helper to show loaded overlays under: /proc/device-tree/chosen/overlays/
+ */
+&{/chosen} {
+	overlays {
+		PB2-I2C-GPIO.kernel = __TIMESTAMP__;
+	};
+};
+
+// definitions from pinmux/board/pocketbeagle2/pocketbeagle2-pinmux.dts
+&main_pmx0 {
+	// I2C1 pins
+	P1_33_A17_gpio: P1-33-A17-gpio-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x01EC, PIN_INPUT, 7) /* (A17) I2C1_SDA.GPIO1_29 */
+			AM62X_IOPAD(0x00E4, PIN_DISABLE, 7) /* (AA23) VOUT0_DATA11.GPIO0_56 */
+		>;
+	};
+
+	P1_36_B17_gpio: P1-36-B17-gpio-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x01E8, PIN_INPUT, 7) /* (B17) I2C1_SCL.GPIO1_28 */
+			AM62X_IOPAD(0x00E0, PIN_DISABLE, 7) /* (V20) VOUT0_DATA10.GPIO0_55 */
+		>;
+	};
+};
+
+&cbass_main {
+	i2c_gpio: i2c_gpio {
+		compatible = "i2c-gpio";
+		//pinctrl-names = "default";
+		//pinctrl-0 = <&P1_33_A17_gpio>, <&P1_36_B17_gpio>;
+		status = "ok";
+		// say you swapped sda/scl pins on a device: use i2c-gpio to fix that
+		scl-gpios = <&main_gpio1 29 (GPIO_ACTIVE_HIGH|GPIO_OPEN_DRAIN)>; // A17 P1.33 i2c1_sda
+		sda-gpios = <&main_gpio1 28 (GPIO_ACTIVE_HIGH|GPIO_OPEN_DRAIN)>; // B17 P1.36 i2c1_scl
+		i2c-gpio,delay-us = <2>;    // ~100 kHz
+		#address-cells = <1>;
+		#size-cells = <0>;
+	};
+};

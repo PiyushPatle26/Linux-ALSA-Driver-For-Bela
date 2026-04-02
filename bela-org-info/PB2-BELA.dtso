@@ -1,0 +1,426 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Copyright (C) 2022 BeagleBoard.org - https://beagleboard.org/
+ *
+ * https://docs.beagleboard.io/latest/boards/capes/cape-interface-spec.html#i2c
+ */
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/leds/common.h>
+#include "ti/k3-pinctrl.h"
+
+/dts-v1/;
+/plugin/;
+
+/*
+ * Helper to show loaded overlays under: /proc/device-tree/chosen/overlays/
+ */
+&{/chosen} {
+	overlays {
+		PB2-BELA.kernel = __TIMESTAMP__;
+	};
+};
+
+// many definitions from pinmux/board/pocketbeagle2/pocketbeagle2-pinmux.dts
+&main_pmx0 {
+	// SPI2 pins
+	P1_06_E19_spi: P1-06-E19-spi-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x01AC, PIN_INPUT, 1) /* (E19) MCASP0_AFSR.SPI2_CS0 */
+		>;
+	};
+	P1_08_spi: P1-08-spi-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x01B0, PIN_INPUT, 1) /* (A20) MCASP0_ACLKR.SPI2_CLK */
+		>;
+	};
+	P1_10_B19_spi: P1-10-B19-spi-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x0194, PIN_INPUT, 1) /* (B19) MCASP0_AXR3.SPI2_D0 */
+		>;
+	};
+	P1_12_A19_spi: P1-12-A19-spi-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x0198, PIN_INPUT, 1) /* (A19) MCASP0_AXR2.SPI2_D1 */
+		>;
+	};
+	// I2C1 pins
+	P1_33_A17_i2c: P1-33-A17-i2c-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x01EC, PIN_INPUT_PULLUP, 0) /* (A17) I2C1_SDA */
+		>;
+	};
+	P1_33_AA23_pullup: P1-33-AA23-gpio-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x00E4, PIN_INPUT_PULLUP, 7) /* (AA23) VOUT0_DATA11.GPIO0_56 */
+		>;
+	};
+	P1_36_B17_i2c: P1-36-B17-i2c-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x01E8, PIN_INPUT_PULLUP, 0) /* (B17) I2C1_SCL */
+		>;
+	};
+	P1_36_V20_pullup: P1-36-V20-gpio-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x00E0, PIN_INPUT_PULLUP, 7) /* (V20) VOUT0_DATA10.GPIO0_55 */
+		>;
+	};
+
+	// MCASP2 pins
+	P2_05_C15_audio: P2-05-C15-audio-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x01D8, PIN_INPUT, 8) /* (C15) MCAN0_TX.MCASP2_AXR0 */
+		>;
+	};
+	P2_07_E15_audio: P2-07-E15-audio-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x01DC, PIN_INPUT, 8) /* (E15) MCAN0_RX.MCASP2_AXR1 */
+		>;
+	};
+	P2_10_audio: P2-10-audio-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x0174, PIN_INPUT, 2) /* (AD21) RGMII2_TD2.MCASP2_AFSX */
+		>;
+	};
+	P2_11_B15_audio_ext_refclk1: P2-11-B15-audio-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x01D4, PIN_INPUT, 5) /* (B15) UART0_RTSn.MCASP2_ACLKX */
+		>;
+	};
+	P2_19_audio: P2-19-audio-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x0178, PIN_INPUT, 2) /* (AC20) RGMII2_TD3.MCASP2_ACLKX */
+		>;
+	};
+	P2_17_pru0out: P2-17-pru0out-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x0104, PIN_OUTPUT, 5) /* (AC24) VOUT0_PCLK.PR0_PRU0_GPO19 */
+		>;
+	};
+	P2_31_audio: P2-31-audio-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x0170, PIN_INPUT, 5) /* (AA18) RGMII2_TD1.MCASP2_AXR8 */
+		>;
+	};
+	P1_02_audio: P1-02-audio-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x0164, PIN_INPUT, 2) /* (AA19) RGMII2_TX_CTL.MCASP2_AXR4 */
+		>;
+	};
+	P1_04_audio: P1-04-audio-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x016C, PIN_INPUT, 2) /* (Y18) RGMII2_TD0.MCASP2_AXR6 */
+		>;
+	};
+	P1_19_audio: P1-19-audio-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x017C, PIN_INPUT, 2) /* (AD22) RGMII2_RX_CTL.MCASP2_AXR3 */
+		>;
+	};
+
+	// bela_extra_gpios pins
+	P2_02_gpio: P2-02-gpio-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x00B8, PIN_INPUT, 7) /* (U22) VOUT0_DATA0.GPIO0_45 */
+		>;
+	};
+	P2_04_gpio: P2-04-gpio-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x00BC, PIN_INPUT, 7) /* (V24) VOUT0_DATA1.GPIO0_46 */
+		>;
+	};
+	P2_06_gpio: P2-06-gpio-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x00C0, PIN_INPUT_PULLUP, 7) /* (W25) VOUT0_DATA2.GPIO0_47 */
+		>;
+	};
+	P2_08_gpio: P2-08-gpio-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x00C4, PIN_INPUT, 7) /* (W24) VOUT0_DATA3.GPIO0_48 */
+		>;
+	};
+	P2_18_gpio: P2-18-gpio-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x00D8, PIN_INPUT, 7) /* (V21) VOUT0_DATA8.GPIO0_53 */
+		>;
+	};
+
+	// bela_digitals pins
+	P2_01_B20_gpio: P2-01-B20-gpio-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x01A4, PIN_INPUT_PULLDOWN, 7) /* (B20) MCASP0_ACLKX.GPIO1_11 */
+		>;
+	};
+	P2_03_B18_gpio: P2-03-B18-gpio-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x019C, PIN_INPUT_PULLDOWN, 7) /* (B18) MCASP0_AXR1.GPIO1_9 */
+		>;
+	};
+	P2_09_A15_gpio: P2-09-A15-gpio-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x01D0, PIN_INPUT_PULLDOWN, 7) /* (A15) UART0_CTSn.GPIO1_22 */
+		>;
+	};
+	P2_25_gpio: P2-25-gpio-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x01C4, PIN_INPUT_PULLDOWN, 7) /* (B14) SPI0_D1.GPIO1_19 */
+		>;
+	};
+	P2_27_gpio: P2-27-gpio-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x01C0, PIN_INPUT_PULLDOWN, 7) /* (B13) SPI0_D0.GPIO1_18 */
+		>;
+	};
+	P2_29_A14_gpio: P2-29-A14-gpio-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x01BC, PIN_INPUT_PULLDOWN, 7) /* (A14) SPI0_CLK.GPIO1_17 */
+		>;
+	};
+	P2_36_gpio: P2-36-gpio-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x01B8, PIN_INPUT_PULLDOWN, 7) /* (C13) SPI0_CS1.GPIO1_16 */
+		>;
+	};
+	P1_21_gpio: P1-21-gpio-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x0190, PIN_INPUT_PULLDOWN, 7) /* (AE22) RGMII2_RD3.GPIO1_6 */
+		>;
+	};
+	P1_23_gpio: P1-23-gpio-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x018C, PIN_INPUT_PULLDOWN, 7) /* (AC21) RGMII2_RD2.GPIO1_5 */
+		>;
+	};
+	P1_25_gpio: P1-25-gpio-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x0188, PIN_INPUT_PULLDOWN, 7) /* (AB20) RGMII2_RD1.GPIO1_4 */
+		>;
+	};
+	P1_27_gpio: P1-27-gpio-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x0184, PIN_INPUT_PULLDOWN, 7) /* (AE23) RGMII2_RD0.GPIO1_3 */
+		>;
+	};
+	P1_30_gpio: P1-30-gpio-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x01CC, PIN_INPUT_PULLDOWN, 7) /* (E14) UART0_TXD.GPIO1_21 */
+		>;
+	};
+	P1_32_gpio: P1-32-gpio-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x01C8, PIN_INPUT_PULLDOWN, 7) /* (D14) UART0_RXD.GPIO1_20 */
+		>;
+	};
+	P1_34_gpio: P1-34-gpio-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x0180, PIN_INPUT_PULLDOWN, 7) /* (AD23) RGMII2_RXC.GPIO1_2 */
+		>;
+	};
+	P2_33_gpio: P2-33-gpio-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x00D4, PIN_INPUT_PULLDOWN, 7) /* (AA25) VOUT0_DATA7.GPIO0_52 */
+		>;
+	};
+	P2_35_gpio: P2-35-gpio-pins {
+		pinctrl-single,pins = <
+			AM62X_IOPAD(0x00DC, PIN_INPUT_PULLDOWN, 7) /* (W21) VOUT0_DATA9.GPIO0_54 */
+		>;
+	};
+};
+
+&epwm2 {
+	// disabled: its pins conflict with our choice of pins for main_i2c1
+	status = "disabled";
+};
+
+&ecap2 {
+	// disabled: its default pins conflict with D7
+	status = "disabled";
+};
+
+&main_i2c1 {
+	pinctrl-names = "default";
+	// try to compensate for signal quality:
+	// add pullups on neighbouring pins
+	pinctrl-0 = <&P1_33_A17_i2c>, <&P1_36_B17_i2c>, <&P1_33_AA23_pullup>, <&P1_36_V20_pullup>;
+	// slow down the clock
+	clock-frequency = <100000>;
+	status = "okay";
+};
+
+&{/aliases} {
+	// the base device tree may have set up arbitrary aliases for /dev/i2c-*
+	// We assign our own arbitrary mapping, which may be counter-intuitive:
+	// (main))I2C1 becomes /dev/i2c-2 and (main_)I2C2 becomes /dev/i2c-1
+	i2c1 = "/bus@f0000/i2c@20020000";
+	i2c2 = "/bus@f0000/i2c@20010000";
+	spi2 = "/bus@f0000/spi@20120000";
+};
+
+&main_spi0 {
+	status= "disabled";
+};
+
+&main_spi2 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&P1_06_E19_spi>, <&P1_08_spi>, <&P1_10_B19_spi>, <&P1_12_A19_spi>;
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+	spidev@0 {
+		compatible = "rohm,dh2228fv";
+		reg = <0>;
+		spi-max-frequency = <24000000>;
+	};
+};
+
+&mcasp2 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&P2_05_C15_audio>,
+				<&P2_07_E15_audio>,
+				<&P2_10_audio>,
+				<&P2_11_B15_audio_ext_refclk1>,
+				<&P2_19_audio>,
+				<&P2_31_audio>,
+				<&P1_02_audio>,
+				<&P1_04_audio>,
+				<&P1_19_audio>;
+
+	interrupt-names = "dummytx", "dummyrx";
+	status = "okay";
+
+	op-mode = <0>;          /* MCASP_IIS_MODE */
+	tdm-slots = <2>;
+
+	serial-dir = <  /* 0: INACTIVE, 1: TX, 2: RX */
+	       2 1 0 0
+	       1 0 2 0
+	       0 0 0 0
+	       0 0 0 0
+	>;
+	tx-num-evt = <1>;
+	rx-num-evt = <1>;
+};
+
+&cbass_main {
+	bela_extra_gpios {
+		compatible = "gpio-leds";
+		pinctrl-0 =
+			<&P2_02_gpio>, // led blue
+			<&P2_04_gpio>, // led red
+			<&P2_06_gpio>, // button
+			<&P2_08_gpio>, // led mosfet
+			<&P2_18_gpio>; // ADC reset
+		pinctrl-names = "default", "sleep";
+	};
+};
+
+// here we override the pinctrl for the base device tree's main_gpios so that they don't conflict with our pins
+
+&main_gpio0 {
+	pinctrl-0 = <>;
+	pinctrl-single,pins = <
+		AM62X_IOPAD(0x00c8, PIN_INPUT, 7) /* (Y25) VOUT0_DATA4.GPIO0_49 */
+		AM62X_IOPAD(0x00cc, PIN_INPUT, 7) /* (Y24) VOUT0_DATA5.GPIO0_50 */
+		AM62X_IOPAD(0x00d0, PIN_INPUT, 7) /* (Y23) VOUT0_DATA6.GPIO0_51 */
+		AM62X_IOPAD(0x00d8, PIN_INPUT, 7) /* (V21) VOUT0_DATA8.GPIO0_53 */
+		AM62X_IOPAD(0x0100, PIN_INPUT, 7) /* (AC25) VOUT0_VSYNC.GPIO0_63 */
+	>;
+};
+
+&main_gpio1 {
+	pinctrl-0 = <>;
+	pinctrl-single,pins = <
+			AM62X_IOPAD(0x01a0, PIN_INPUT, 7) /* (E18) MCASP0_AXR0.GPIO1_10 */
+			AM62X_IOPAD(0x01a8, PIN_INPUT, 7) /* (D20) MCASP0_AFSX.GPIO1_12 */
+	>;
+};
+
+&{/leds} {
+	bela-led {
+		bootph-all;
+		gpios = <&main_gpio0 48 GPIO_ACTIVE_HIGH>;
+		color = <LED_COLOR_ID_BLUE>;
+		linux,default-trigger = "heartbeat";
+		function = "bela-power";
+	};
+};
+
+&cbass_main {
+	bela_digitals {
+		compatible = "gpio-leds";
+		pinctrl-0 =
+			<&P1_21_gpio>, // D0 GPIO1_6
+			<&P1_23_gpio>, // D1 GPIO1_5
+			<&P1_25_gpio>, // D2 GPIO1_4
+			<&P1_27_gpio>, // D3 GPIO1_3
+			<&P1_30_gpio>, // D4 GPIO1_21
+			<&P1_32_gpio>, // D5 GPIO1_20
+			<&P1_34_gpio>, // D6 GPIO1_2
+			<&P2_01_B20_gpio>, // D7 GPIO1_11
+			<&P2_03_B18_gpio>, // D8 GPIO1_9
+			<&P2_09_A15_gpio>, // D9 GPIO1_22
+			<&P2_25_gpio>, // D10 GPIO1_19
+			<&P2_27_gpio>, // D11 GPIO1_18
+			<&P2_29_A14_gpio>, // D12 GPIO1_17
+			<&P2_36_gpio>, // D13 GPIO1_16
+			<&P2_33_gpio>, // D14 GPIO0_52
+			<&P2_35_gpio>; // D15 GPIO0_54
+		pinctrl-names = "default", "sleep";
+	};
+	o2l {
+		// dummy driver, just to claim this pin for O2L
+		compatible = "gpio-leds";
+		pinctrl-0 = <&P2_17_pru0out>;
+		pinctrl-names = "default", "sleep";
+	};
+};
+
+&main_uart0 {
+	// uses P1.32 and P1.30 which are used by bela_digitals
+	status = "disabled";
+};
+
+// below: disable reserved ram, from https://github.com/FalconChristmas/fpp/blob/master/capes/drivers/bb64/fpp-base-overlay.dts
+
+&{/firmware} {
+        optee {
+                status = "disabled";
+        };
+};
+
+&reserved_memory {
+	#address-cells = <2>;
+	#size-cells = <2>;
+
+	linux,cma {
+		compatible = "shared-dma-pool";
+		reusable;
+		size = <0x00 0x4000000>;
+		linux,cma-default;
+	};
+	secure_ddr: optee@9e800000 {
+		reg = <0x00 0x9e800000 0x00 0x0400000>;
+		alignment = <0x1000>;
+		no-map;
+	};
+	wkup_r5fss0_core0_dma_memory_region: r5f-dma-memory@9db00000 {
+			compatible = "shared-dma-pool";
+			reg = <0x00 0x9db00000 0x00 0x400000>;
+			no-map;
+	};
+	bela_io_memory: bela-io-memory {
+			reg = <0x00 0x9ec00000 0x00 0x100000>;
+			no-map;
+	};
+};
+
+&{/} {
+        #address-cells = <2>;
+        #size-cells = <2>;
+        bela-io-memory-uio {
+		status = "okay";
+                compatible = "generic-uio";
+                reg = <0x00 0x9ec00000 0x00 0x100000>;
+        };
+};
