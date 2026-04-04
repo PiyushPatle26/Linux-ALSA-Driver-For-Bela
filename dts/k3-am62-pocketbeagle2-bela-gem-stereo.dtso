@@ -1,0 +1,176 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * PocketBeagle2 + Bela Gem Stereo audio overlay
+ *
+ * Hardware:
+ *   Codec: TLV320AIC3106 (I2C, addr 0x18)
+ *   McASP2 as CPU DAI
+ *   Codec is BCLK + WCLK master (generates clocks from McASP-supplied MCLK)
+ *
+ * Clock topology (verified with oscilloscope):
+ *   AM62x McASP2 AHCLKX  →  P2.11 (MCLK to codec, ~24 MHz = 96/4)
+ *   TLV320AIC3106 PLL    →  P2.19 (BCLK = ~1.41 MHz = 44100x2x16)
+ *   TLV320AIC3106        →  P2.10 (WCLK = ~44.1 kHz)
+ *
+ * Pins:
+ *   P2.05  MCASP2_AXR0  TX  → TLV320AIC3106 DIN  (stereo playback)
+ *   P2.07  MCASP2_AXR1  RX  ← TLV320AIC3106 DOUT (stereo capture)
+ *   P2.10  MCASP2_AFSX       WCLK (codec drives, McASP slave)
+ *   P2.11  MCASP2_AHCLKX     MCLK output (McASP clock output to codec)
+ *   P2.19  MCASP2_ACLKX      BCLK (codec drives, McASP slave)
+ */
+
+#include <dt-bindings/gpio/gpio.h>
+#include "k3-pinctrl.h"
+
+/dts-v1/;
+/plugin/;
+
+&{/chosen} {
+	overlays {
+		k3-am62-pocketbeagle2-bela-gem-stereo.kernel = __TIMESTAMP__;
+	};
+};
+
+/*
+ * STEP 1: Configure McASP2 for stereo I2S, codec as clock master.
+ *
+ * assigned-clocks:
+ *   k3_clks 192 15 = MCASP2 AHCLKX mux (selects MCLK source)
+ * assigned-clock-parents:
+ *   k3_clks 192 18 = AUDIO_EXT_REFCLK1 path
+ *   This gives us 96 MHz ÷ integer = ~12 MHz on P2.11.
+ *
+ * NOTE: The pinctrl for all MCASP2 pins is already provided by the base
+ * PB2-BELA.dtso overlay. Do not duplicate them here — just add the audio
+ * configuration. If using this overlay standalone (without PB2-BELA.dtso),
+ * add pinctrl-0 entries from PB2-BELA.dtso.
+ */
+&mcasp2 {
+	status = "okay";
+	#sound-dai-cells = <0>;
+
+	/*
+	 * Set AHCLKX (the high-freq reference that feeds MCLK out on P2.11).
+	 * Index 15 = AHCLKX mux, parent index 18 = AUDIO_EXT_REFCLK1.
+	 *
+	 * Oscilloscope shows ~23.8 MHz on P2.11 = 96 MHz / 4 = 24 MHz.
+	 * The TLV320AIC3106 PLL divides this down to generate BCLK/WCLK.
+	 */
+	assigned-clocks = <&k3_clks 192 15>;
+	assigned-clock-parents = <&k3_clks 192 18>;
+
+	op-mode = <0>;      /* MCASP_IIS_MODE */
+	tdm-slots = <2>;
+
+	/*
+	 * serial-dir: 16 entries (serializers 0–15)
+	 *   0 = INACTIVE
+	 *   1 = TX (McASP → codec)
+	 *   2 = RX (codec → McASP)
+	 *
+	 * Verified against Gem Multi rev A4 schematic (confirmed by giuliomoro):
+	 *   P2.05 pin → MCASP2_AXR0 → SoC → codec DIN = TX (playback)
+	 *   P2.07 pin → MCASP2_AXR1 → codec DOUT → SoC = RX (capture)
+	 * NOTE: k3-am62-pocketbeagle2-bela-gem.dtsi has this backwards — dtsi is wrong.
+	 *
+	 * serial-dir indices map to serializer numbers directly.
+	 */
+	serial-dir = <
+		1 2 0 0   /* AXR0=TX(SoC→codec DIN), AXR1=RX(codec DOUT→SoC), 2-3 inactive */
+		0 0 0 0
+		0 0 0 0
+		0 0 0 0
+	>;
+
+	tx-num-evt = <1>;
+	rx-num-evt = <1>;
+};
+
+/*
+ * STEP 2: TLV320AIC3106 codec on I2C1 (= /dev/i2c-2 per PB2-BELA.dtso alias).
+ *
+ * Address 0x18 = CODEC_ADDR pin tied low.
+ * Address 0x1B = CODEC_ADDR pin tied high.
+ * Check bela-org-info/hardware/bela-gem-stereo/ schematic to confirm.
+ *
+ * The compatible string "ti,tlv320aic3106" matches the upstream driver:
+ *   sound/soc/codecs/tlv320aic3x.c
+ * This driver covers AIC3104/3105/3106/3107 via the aic3x family.
+ */
+&main_i2c1 {
+	/* main_i2c1 is already enabled by PB2-BELA.dtso */
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	tlv320aic3106: audio-codec@18 {
+		compatible = "ti,tlv320aic3106";
+		reg = <0x18>;        /* CHANGE TO 0x1B if schematic shows ADDR=high */
+		#sound-dai-cells = <0>;
+
+		/*
+		 * DVDD and IOVDD are 3.3V, AVDD is 3.3V on Bela Gem Stereo.
+		 * Supply references: check if your DTS has regulators defined,
+		 * otherwise the driver will use fixed-regulator defaults.
+		 */
+		/* DVDD-supply = <&vcc_3v3>; */   /* add if your DTS defines these */
+		/* IOVDD-supply = <&vcc_3v3>; */
+		/* AVDD-supply = <&vcc_3v3>; */
+	};
+};
+
+/*
+ * STEP 3: Sound card declaration using simple-audio-card.
+ *
+ * Configuration derived from oscilloscope measurements (NOT guessed):
+ *  - format = "i2s": scope shows I2S framing (not DSP_B/TDM)
+ *  - NO bitclock-inversion: I2S mode doesn't need it
+ *  - bitclock-master / frame-master = codec: TLV generates BCLK and WCLK
+ *  - MCLK = 24 MHz: scope measured ~23.8 MHz on P2.11 (96 MHz / 4)
+ *
+ * Measured baseline: 44.1 kHz, 2ch, 16-bit I2S
+ *   BCLK = 44100 x 2 x 16 = 1.4112 MHz (confirmed on scope)
+ */
+&{/} {
+	/*
+	 * Fixed clock representing MCLK on P2.11.
+	 * Scope measured ~23.8 MHz = 96 MHz / 4 = 24 MHz.
+	 * The TLV320AIC3106 PLL uses this to derive BCLK and WCLK.
+	 */
+	bela_stereo_mclk: bela-stereo-mclk {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <24000000>;
+	};
+
+	bela_stereo_sound: sound-bela-stereo {
+		compatible = "simple-audio-card";
+		simple-audio-card,name = "BelaGemStereo";
+
+		simple-audio-card,widgets =
+			"Headphone", "Headphone Jack",
+			"Line",       "Line In";
+
+		simple-audio-card,routing =
+			"Headphone Jack", "HPLOUT",
+			"Headphone Jack", "HPROUT",
+			"LINE1L",         "Line In",
+			"LINE1R",         "Line In";
+
+		/* I2S format — confirmed by oscilloscope measurement */
+		simple-audio-card,format = "i2s";
+
+		/* Codec is BCLK and WCLK master */
+		simple-audio-card,bitclock-master = <&bela_stereo_codec_dai>;
+		simple-audio-card,frame-master   = <&bela_stereo_codec_dai>;
+
+		simple-audio-card,cpu {
+			sound-dai = <&mcasp2>;
+		};
+
+		bela_stereo_codec_dai: simple-audio-card,codec {
+			sound-dai = <&tlv320aic3106>;
+			clocks = <&bela_stereo_mclk>;
+		};
+	};
+};

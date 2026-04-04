@@ -7,15 +7,24 @@ $schema: http://devicetree.org/meta-schemas/core.yaml#
 title: ESS Technology ES9080Q 8-Channel Audio DAC
 
 maintainers:
-  - Jian De <jiande2020@gmail.com>
-  - Giulio Moro <giuliomoro@gmail.com>
   - Piyush Patle <piyushpatle1228@gmail.com>
+  - Giulio Moro <giuliomoro@gmail.com>
 
 description: |
-  The ES9080Q is an 8-channel audio DAC with TDM input (up to 16 slots).
-  Register control is via I2C. The chip exposes two I2C addresses:
-    - Primary (0x48):  read/write registers for audio configuration
-    - Secondary (0x4C): write-only registers for PLL/GPIO control
+  The ES9080Q is an 8-channel 32-bit audio DAC with TDM input.
+  Register control is via I2C. The chip has two I2C address ranges:
+
+    - Primary (e.g. 0x48): read/write registers 0–164 and
+      read-only registers 224–255. Used for audio configuration,
+      volume control, TDM setup, and status readback.
+
+    - Secondary (e.g. 0x4C): write-only registers 192–203.
+      Used for soft reset, PLL configuration, and GPIO control.
+      The secondary address is always primary + 4.
+
+  On the Bela Gem Multi cape the ES9080Q operates as a TDM slave,
+  receiving BCLK and WCLK from a TLV320AIC3106 codec. Audio data
+  arrives via McASP TDM serializers.
 
 allOf:
   - $ref: /schemas/sound/audio-dai.yaml#
@@ -26,39 +35,39 @@ properties:
 
   reg:
     maxItems: 1
-    description: I2C address of the primary read/write interface (0x48).
+    description:
+      I2C address of the primary read/write interface (e.g. 0x48).
 
   ess,write-only-addr:
     $ref: /schemas/types.yaml#/definitions/uint32
     description: |
-      I2C address of the write-only register interface (0x4C). The driver
-      creates a dummy I2C client at this address on the same adapter for
-      PLL and GPIO register access.
+      I2C address of the write-only register interface (e.g. 0x4C).
+      The driver creates a dummy I2C client at this address on the
+      same adapter for PLL and reset register access. If omitted,
+      PLL configuration is unavailable and the driver logs a warning.
 
   reset-gpios:
     maxItems: 1
     description: |
-      Optional GPIO connected to the active-low hardware reset pin (RSTN).
-      Omit on boards where ES9080Q reset is tied to the board-level reset
-      domain rather than a dedicated Linux-controlled GPIO.
+      Optional GPIO connected to the CHIP_EN / hardware reset pin.
+      Active-high: assert low to reset, deassert high to enable.
+      Omit on boards where reset is tied to a board-level GPIO hog
+      or power-on-reset domain.
 
   "#sound-dai-cells":
     const: 0
 
   clocks:
     maxItems: 1
-    items:
-      - description: Master clock (MCLK) input.
+    description: Master clock (MCLK) input, if supplied externally.
 
   clock-names:
-    maxItems: 1
     items:
       - const: mclk
 
 required:
   - compatible
   - reg
-  - ess,write-only-addr
   - "#sound-dai-cells"
 
 additionalProperties: false
@@ -70,11 +79,10 @@ examples:
         #address-cells = <1>;
         #size-cells = <0>;
 
-        es9080q: codec@48 {
+        es9080q: dac@48 {
             compatible = "ess,es9080q";
             reg = <0x48>;
             #sound-dai-cells = <0>;
             ess,write-only-addr = <0x4c>;
-            reset-gpios = <&gpio0 11 GPIO_ACTIVE_LOW>;
         };
     };

@@ -1,159 +1,68 @@
 # Linux ALSA Driver for Bela (PB2 / AM62x)
 
-## Current Progress
+## Project
 
-This project is an ongoing bring-up of the **Bela Gem Multi audio system** on **PocketBeagle 2 (AM62x)**.
+GSoC project: upstream Linux ALSA/ASoC support for Bela Gem audio capes
+on PocketBeagle2 (AM62x).
 
-The codebase currently includes:
+Two boards:
+- **Bela Gem Stereo** — TLV320AIC3106 only (2ch playback + 2ch capture)
+- **Bela Gem Multi** — TLV320AIC3106 + ES9080Q + 2x TLV320ADC3140 (10ch playback + 4ch capture)
 
-* ES9080Q codec driver (functional, SoC-independent)
-* Bela machine driver (AM335x-oriented, not yet ported)
-* AM335x DTS (used as reference only)
-* Initial devicetree bindings for both codecs
-
-
-
-## Current Gaps
-
-### 1. PB2 Device Tree Overlay — INCOMPLETE
-
-No working AM62x overlay exists yet.
-
-Missing:
-
-* `main_pmx0` pinmux configuration
-* Correct McASP0 serializer mapping
-* AHCLKX (MCLK) configuration
-* Proper `k3_clks` usage
-* Verified I2C bus binding
-
----
-
-### 2. Hardware Validation Not Done
-
-The following are still assumptions:
-
-* Which I2C bus the codecs are on
-* Whether codec is clock master (FSYNC/BCLK direction)
-* AHCLKX routing (critical for PLL lock)
-* ES9080Q reset GPIO
-
-These directly affect whether the system will work at all.
-
----
-
-### 3. Machine Driver Not Ported
-
-Current issues:
-
-* Uses AM335x clock model
-* Uses legacy pinmux assumptions
-* No integration with AM62x clock framework (`k3_clks`)
-
----
-
-## What is Confirmed
-
-From PB2 expansion documentation:
-
-| Signal | Pin   | Function     |
-| ------ | ----- | ------------ |
-| AXR0   | P1.02 | RX           |
-| AFSX   | P1.04 | FSYNC        |
-| AFSR   | P1.06 | RX FSYNC     |
-| ACLKR  | P1.08 | BCLK         |
-| AXR3   | P1.10 | TX (AIC3106) |
-| AXR2   | P1.12 | TX (ES9080Q) |
-
-Codec:
-
-* TLV320AIC3106 (not AIC3104)
-* ES9080Q
-
-
-## Immediate Next Steps
-
-### Step 1 — Verify Hardware (mandatory)
+## Repository Structure
 
 ```
-i2cdetect -l
-i2cdetect -y <bus>
+driver/sound/soc/codecs/es9080q.c          ES9080Q 8-ch DAC codec driver (new)
+driver/sound/soc/codecs/Kconfig            Kconfig entry for ES9080Q
+driver/sound/soc/codecs/Makefile           Makefile entry for ES9080Q
+driver/sound/soc/ti/bela.c                 Bela machine driver (Multi, AM62x port pending)
+driver/sound/soc/ti/Kconfig                Kconfig entry for Bela machine driver
+driver/sound/soc/ti/Makefile               Makefile entry for Bela machine driver
+
+dts/k3-am62-pocketbeagle2-bela-gem-stereo.dtso   Stereo overlay (simple-audio-card)
+dts/k3-am62-pocketbeagle2-bela-gem-multi.dtso     Multi overlay (multi-DAI-link)
+dts/k3-am62-pocketbeagle2-bela-gem.dtsi           Reference dtsi (compiled into base DT)
+dts/k3-am62-pocketbeagle2.dts                     Base PB2 DT (includes dtsi)
+dts/BB-BONE-BELA-REVC-00A0.dts                    Legacy BBB Bela cape (reference only)
+
+Documentation/devicetree/bindings/sound/ess,es9080q.yaml       ES9080Q DT binding
+Documentation/devicetree/bindings/sound/bela,audio-cape.yaml    Bela Multi machine DT binding
+
+BRINGUP.md              Step-by-step hardware bring-up guide
+hardware_validation.md  Oscilloscope/logic-analyzer validation phases
+UPSTREAM-STRUCTURE.txt  Upstream patch series file layout
 ```
 
-Expected:
+## Pin Mapping (Verified)
 
-* 0x18 → AIC3106
-* 0x48 → ES9080Q
+From `k3-am62-pocketbeagle2-bela-gem.dtsi` and GemMulti rev A4 schematic:
 
-If not visible, stop. Fix hardware understanding first.
+| Signal | Pin | McASP2 Function | Direction |
+|--------|------|-----------------|-----------|
+| AUD_DIN  | P2.05 | AXR0 | TX (SoC → codec DIN, playback) |
+| AUD_DOUT | P2.07 | AXR1 | RX (codec DOUT → SoC, capture) |
+| AUD_WCLK | P2.10 | AFSX | Input (codec-driven) |
+| AUD_MCLK | P2.11 | AUDIO_EXT_REFCLK1 | Output (12.288 MHz) |
+| AUD_BCLK | P2.19 | ACLKX | Input (codec-driven) |
 
----
+I2C bus: `main_i2c1` (`/dev/i2c-2`)
 
-### Step 2 — Minimal AM62x Overlay
+| Device | I2C Address | Notes |
+|--------|-------------|-------|
+| TLV320AIC3106 | 0x18 | BCLK/WCLK master |
+| ES9080Q (R/W) | 0x48 | Primary registers 0–164 |
+| ES9080Q (W/O) | 0x4C | Reset/PLL registers 192–203 |
 
-Goal: probe codecs only
+## Current Status
 
-```
-&main_i2cX {
-    tlv320aic3106@18 { ... };
-    es9080q@48 { ... };
-};
-```
+- ES9080Q codec driver: register map verified, init sequence implemented
+- Stereo overlay: ready for hardware testing (uses upstream drivers only)
+- Multi overlay: ready for testing after Stereo is validated
+- Machine driver (`bela.c`): AM62x port pending (uses AM335x clock model)
+- Next milestone: Stereo board audio test on hardware
 
-No McASP yet.
+## Bring-Up Order
 
-Success = probe messages in dmesg
-
----
-
-### Step 3 — Validate ES9080Q Driver
-
-* Load module
-* Confirm:
-
-  * Probe success
-  * Register writes succeed
-
----
-
-### Step 4 — Bring Up McASP (AM62x)
-
-Port:
-
-* Pinmux → `main_pmx0`
-* Clocks → `k3_clks`
-* Serializers → AXR2 / AXR3
-
-Goal:
-
-* McASP active
-* No clock errors
-
----
-
-### Step 5 — Port Machine Driver
-
-* Replace AM335x clock logic
-* Adapt DAI links for AM62x
-* Verify DAPM routing
-
----
-
-### Step 6 — Audio Testing
-
-Order matters:
-
-1. AIC3106 (2-channel)
-2. ES9080Q (8-channel)
-3. Full 10-channel TDM
-
-## Summary
-
-* ES9080Q driver: ready
-* Machine driver: not portable yet
-* DTS: incomplete for PB2
-* Hardware mapping: partially known
-* Next milestone: successful codec probe on AM62x
-
----
-
+1. **Stereo board** — follow `BRINGUP.md` Board A Steps 1–5
+2. **Multi board** — follow `BRINGUP.md` Board B Steps 1–6
+3. Port `bela.c` machine driver to AM62x (future)
