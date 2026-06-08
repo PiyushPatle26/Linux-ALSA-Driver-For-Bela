@@ -1,0 +1,46 @@
+# ---------------------------------------------------------------------------
+# Build trees and out-of-tree artifacts (never commit these)
+# ---------------------------------------------------------------------------
+# Full kernel source/build tree used only for local module + dtbo builds.
+/linux/
+# Staged module install root / packaging output.
+/build/
+# Editor/agent scratch + planning notes.
+/.embedder/
+/.claude/
+
+# ---------------------------------------------------------------------------
+# Large binaries and local-only documents
+# ---------------------------------------------------------------------------
+*.pdf
+/docs/
+
+# ---------------------------------------------------------------------------
+# Compiled / generated kernel objects
+# ---------------------------------------------------------------------------
+*.o
+*.o.*
+*.a
+*.ko
+*.ko.*
+*.mod
+*.mod.c
+*.cmd
+.tmp_*/
+*.dtb
+*.dtbo
+*.symvers
+modules.order
+modules.builtin*
+
+# ---------------------------------------------------------------------------
+# Local session / scratch notes (kept out of the upstream-facing tree)
+# ---------------------------------------------------------------------------
+/context.md
+
+# ---------------------------------------------------------------------------
+# Editor / OS noise
+# ---------------------------------------------------------------------------
+*~
+*.swp
+.DS_Store

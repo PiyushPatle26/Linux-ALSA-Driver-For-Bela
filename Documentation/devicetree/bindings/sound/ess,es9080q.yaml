@@ -8,26 +8,21 @@ title: ESS Technology ES9080Q 8-Channel Audio DAC
 
 maintainers:
   - Piyush Patle <piyushpatle1228@gmail.com>
-  - Giulio Moro <giuliomoro@gmail.com>
 
 description: |
   The ES9080Q is an 8-channel 32-bit audio DAC with TDM input.
-  Register control is via I2C. The chip has two I2C address ranges:
+  Register control is via I2C. The chip exposes two I2C address ranges:
 
-    - Primary (e.g. 0x48): read/write registers 0–164 and
-      read-only registers 224–255. Used for audio configuration,
-      volume control, TDM setup, and status readback.
+    Primary (e.g. 0x48): read/write registers 0-164 and read-only
+    registers 224-255. Used for audio configuration, volume control,
+    TDM setup, and status readback.
 
-    - Secondary (e.g. 0x4C): write-only registers 192–203.
-      Used for soft reset, PLL configuration, and GPIO control.
-      The secondary address is always primary + 4.
+    Secondary (e.g. 0x4C): write-only registers 192-203.
+    Used for soft reset, PLL configuration, and GPIO control.
+    The secondary address is always primary + 4.
 
   On the Bela Gem Multi cape the ES9080Q operates as a TDM slave,
-  receiving BCLK and WCLK from a TLV320AIC3106 codec. Audio data
-  arrives via McASP TDM serializers.
-
-allOf:
-  - $ref: /schemas/sound/audio-dai.yaml#
+  receiving BCLK and WCLK from a TLV320AIC3106 codec.
 
 properties:
   compatible:
@@ -40,19 +35,16 @@ properties:
 
   ess,write-only-addr:
     $ref: /schemas/types.yaml#/definitions/uint32
-    description: |
+    description:
       I2C address of the write-only register interface (e.g. 0x4C).
-      The driver creates a dummy I2C client at this address on the
-      same adapter for PLL and reset register access. If omitted,
-      PLL configuration is unavailable and the driver logs a warning.
+      The driver creates a dummy I2C client at this address on the same
+      adapter for PLL and reset register access. If omitted, PLL
+      configuration is skipped and the driver logs a warning.
 
   reset-gpios:
     maxItems: 1
-    description: |
+    description:
       Optional GPIO connected to the CHIP_EN / hardware reset pin.
-      Active-high: assert low to reset, deassert high to enable.
-      Omit on boards where reset is tied to a board-level GPIO hog
-      or power-on-reset domain.
 
   "#sound-dai-cells":
     const: 0
@@ -70,16 +62,15 @@ required:
   - reg
   - "#sound-dai-cells"
 
-additionalProperties: false
+unevaluatedProperties: false
 
 examples:
   - |
-    #include <dt-bindings/gpio/gpio.h>
     i2c {
         #address-cells = <1>;
         #size-cells = <0>;
 
-        es9080q: dac@48 {
+        dac@48 {
             compatible = "ess,es9080q";
             reg = <0x48>;
             #sound-dai-cells = <0>;

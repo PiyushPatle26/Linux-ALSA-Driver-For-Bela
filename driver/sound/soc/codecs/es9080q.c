@@ -3,19 +3,22 @@
  * ESS ES9080Q 8-channel 32-bit DAC — ASoC codec driver
  *
  * The ES9080Q is an I2C-controlled, TDM-input 8-channel HiFi DAC.
- * It receives audio via up to two TDM serial data lines (DATA1, DATA2),
- * each carrying 4 channels at 32-bit/slot in TDM8 format.
+ * It supports up to two TDM serial data lines, but on Bela Gem Multi all
+ * 8 channels are carried on a SINGLE data line (DATA line 1, slots 0-7,
+ * 32-bit/slot, TDM8). This matches Bela's shipping userspace driver
+ * (Es9080_Codec.cpp), which sets every channel's TDM_CHx_LINE_SEL to
+ * "receive from data line 1". es9080q_hw_init() programs the same mapping.
  *
  * Hardware connections on Bela Gem Multi (PocketBeagle2):
  *   I2C:      main_i2c1 (bus 2 in Linux)
- *   TDM A:    McASP2_AXR3 (P1.19) → ES9080Q DATA  (ch 0–7)
+ *   TDM DATA: McASP2_AXR6 (P1.04) -> ES9080Q DATA line 1 (ch 1-8, slots 0-7)
  *   BCLK:     P2.19 (McASP2_ACLKX, sourced from TLV320AIC3106 PLL)
  *   WCLK:     P2.10 (McASP2_AFSX,  sourced from TLV320AIC3106)
  *
  * The ES9080Q has two I2C interfaces:
- *   Read/Write (primary):  registers 0–164 (0x00–0xA4) R/W,
- *                          registers 224–255 (0xE0–0xFF) read-only
- *   Write-only (secondary): registers 192–203 (0xC0–0xCB) write-only
+ *   Read/Write (primary):  registers 0-164 (0x00-0xA4) R/W,
+ *                          registers 224-255 (0xE0-0xFF) read-only
+ *   Write-only (secondary): registers 192-203 (0xC0-0xCB) write-only
  *                           Used for reset and PLL configuration.
  *   The write-only address is always primary_address + 4
  *   (e.g. primary=0x48, write-only=0x4C).
@@ -27,59 +30,51 @@
  * Author: Piyush Patle <piyushpatle1228@gmail.com>
  */
 
-#include <linux/module.h>
-#include <linux/i2c.h>
 #include <linux/delay.h>
 #include <linux/gpio/consumer.h>
+#include <linux/i2c.h>
+#include <linux/module.h>
+#include <linux/regmap.h>
 #include <sound/soc.h>
 #include <sound/soc-dapm.h>
 #include <sound/tlv.h>
 
-/* ------------------------------------------------------------------ */
-/* Register map — verified against Es9080_Codec.cpp + datasheet       */
-/* ------------------------------------------------------------------ */
+/* Register map — verified against Es9080_Codec.cpp + datasheet */
 
 /*
- * Registers 0–164 (0x00–0xA4): Read/Write — accessed via primary I2C addr
- * Registers 192–203 (0xC0–0xCB): Write-only — accessed via secondary I2C addr
- * Registers 224–255 (0xE0–0xFF): Read-only — accessed via primary I2C addr
+ * Registers 0-164 (0x00-0xA4): Read/Write via primary I2C addr
+ * Registers 192-203 (0xC0-0xCB): Write-only via secondary I2C addr
+ * Registers 224-255 (0xE0-0xFF): Read-only via primary I2C addr
  */
 
 /* Core control (primary address, R/W) */
-#define ES9080Q_REG_AMP_CTRL		0x00	/* Amplifier control: 0x02 = turn on */
-#define ES9080Q_REG_INTERP_MOD_CLK	0x01	/* Interpolation & modulator clocks */
-#define ES9080Q_REG_TDM_DECODER		0x02	/* TDM decoder enable: 0x01 = on */
-#define ES9080Q_REG_DAC_CONFIG		0x03	/* SELECT_IDAC_NUM: DAC clock divider */
-#define ES9080Q_REG_MASTER_CLK		0x04	/* SELECT_MENC_NUM: master clock div */
-#define ES9080Q_REG_ANALOG_EN		0x05	/* Analog section enable per channel */
-#define ES9080Q_REG_CP_CLK_DIV		0x06	/* Charge pump clock divider */
-#define ES9080Q_REG_ANALOG_DELAY	0x07	/* Analog delay sequence for quiet pop */
+#define ES9080Q_REG_AMP_CTRL		0x00
+#define ES9080Q_REG_INTERP_MOD_CLK	0x01
+#define ES9080Q_REG_TDM_DECODER		0x02
+#define ES9080Q_REG_DAC_CONFIG		0x03
+#define ES9080Q_REG_MASTER_CLK		0x04
+#define ES9080Q_REG_ANALOG_EN		0x05
+#define ES9080Q_REG_CP_CLK_DIV		0x06
+#define ES9080Q_REG_ANALOG_DELAY	0x07
 
-#define ES9080Q_REG_PLL_LOCK		0x33	/* reg 51: force PLL lock signal */
+#define ES9080Q_REG_PLL_LOCK		0x33
 
 /* TDM configuration */
-#define ES9080Q_REG_INPUT_CONFIG	0x4D	/* reg 77: master mode + TDM select */
-#define ES9080Q_REG_MASTER_MODE		0x4E	/* reg 78: master BCK/WS config */
-#define ES9080Q_REG_TDM_CONFIG1		0x4F	/* reg 79: WS scale, slot count */
-#define ES9080Q_REG_TDM_CONFIG2		0x50	/* reg 80: LJ mode, valid edge */
-#define ES9080Q_REG_TDM_CONFIG3		0x51	/* reg 81: bit width per slot */
-#define ES9080Q_REG_BCK_WS_MON		0x52	/* reg 82: BCK/WS monitor */
-#define ES9080Q_REG_TDM_VALID_PULSE	0x53	/* reg 83: valid pulse position */
+#define ES9080Q_REG_INPUT_CONFIG	0x4D
+#define ES9080Q_REG_MASTER_MODE		0x4E
+#define ES9080Q_REG_TDM_CONFIG1		0x4F
+#define ES9080Q_REG_TDM_CONFIG2		0x50
+#define ES9080Q_REG_TDM_CONFIG3		0x51
+#define ES9080Q_REG_BCK_WS_MON		0x52
+#define ES9080Q_REG_TDM_VALID_PULSE	0x53
 
-/* TDM channel-to-slot mapping: regs 84–91 (0x54–0x5B) */
-#define ES9080Q_REG_TDM_CH1_CFG	0x54	/* reg 84 */
-#define ES9080Q_REG_TDM_CH2_CFG	0x55
-#define ES9080Q_REG_TDM_CH3_CFG	0x56
-#define ES9080Q_REG_TDM_CH4_CFG	0x57
-#define ES9080Q_REG_TDM_CH5_CFG	0x58
-#define ES9080Q_REG_TDM_CH6_CFG	0x59
-#define ES9080Q_REG_TDM_CH7_CFG	0x5A
-#define ES9080Q_REG_TDM_CH8_CFG	0x5B
+/* TDM channel-to-slot mapping: regs 84-91 (0x54-0x5B) */
+#define ES9080Q_REG_TDM_CH1_CFG		0x54
 
-#define ES9080Q_REG_DAC_RESYNC		0x5C	/* reg 92: DAC clock resync */
+#define ES9080Q_REG_DAC_RESYNC		0x5C
 
-/* Per-channel volume: regs 94–101 (0x5E–0x65), 0.5 dB attenuation steps */
-#define ES9080Q_REG_VOL_CH1		0x5E	/* reg 94 */
+/* Per-channel volume: regs 94-101 (0x5E-0x65), 0.5 dB steps */
+#define ES9080Q_REG_VOL_CH1		0x5E
 #define ES9080Q_REG_VOL_CH2		0x5F
 #define ES9080Q_REG_VOL_CH3		0x60
 #define ES9080Q_REG_VOL_CH4		0x61
@@ -88,37 +83,41 @@
 #define ES9080Q_REG_VOL_CH7		0x64
 #define ES9080Q_REG_VOL_CH8		0x65
 
-#define ES9080Q_REG_VOL_CTRL		0x69	/* reg 105: volume & mono control */
+#define ES9080Q_REG_VOL_CTRL		0x69
 
 /* Filter and dither */
-#define ES9080Q_REG_FILTER_CFG		0x6C	/* reg 108 */
-#define ES9080Q_REG_DITHER_CFG		0x6D	/* reg 109 */
+#define ES9080Q_REG_FILTER_CFG		0x6C
+#define ES9080Q_REG_DITHER_CFG		0x6D
 
 /* THD compensation */
-#define ES9080Q_REG_THD_C2_ODD		0x6F	/* reg 111: C2 coeff CH1/3/5/7 */
-#define ES9080Q_REG_THD_C2H_ODD	0x70	/* reg 112 */
-#define ES9080Q_REG_THD_C3_ODD		0x71	/* reg 113: C3 coeff CH1/3/5/7 */
-#define ES9080Q_REG_THD_C2_EVEN	0x73	/* reg 115: C2 coeff CH2/4/6/8 */
-#define ES9080Q_REG_THD_C2H_EVEN	0x74	/* reg 116 */
-#define ES9080Q_REG_THD_C3_EVEN	0x75	/* reg 117: C3 coeff CH2/4/6/8 */
+#define ES9080Q_REG_THD_C2_ODD		0x6F
+#define ES9080Q_REG_THD_C2H_ODD		0x70
+#define ES9080Q_REG_THD_C3_ODD		0x71
+#define ES9080Q_REG_THD_C2_EVEN		0x73
+#define ES9080Q_REG_THD_C2H_EVEN	0x74
+#define ES9080Q_REG_THD_C3_EVEN		0x75
 
-#define ES9080Q_REG_AUTOMUTE		0x77	/* reg 119 */
+#define ES9080Q_REG_AUTOMUTE		0x77
 
 /* Noise shaping modulator */
-#define ES9080Q_REG_NSMOD_PHASE		0x80	/* reg 128 */
-#define ES9080Q_REG_NSMOD_TYPE		0x81	/* reg 129 */
-#define ES9080Q_REG_NSMOD_DITH_12	0x83	/* reg 131: dither CH1/2 */
-#define ES9080Q_REG_NSMOD_DITH_34	0x84	/* reg 132: dither CH3/4 */
-#define ES9080Q_REG_NSMOD_DITH_56	0x85	/* reg 133: dither CH5/6 */
-#define ES9080Q_REG_NSMOD_DITH_78	0x86	/* reg 134: dither CH7/8 */
+#define ES9080Q_REG_NSMOD_PHASE		0x80
+#define ES9080Q_REG_NSMOD_TYPE		0x81
+#define ES9080Q_REG_NSMOD_DITH_12	0x83
+#define ES9080Q_REG_NSMOD_DITH_34	0x84
+#define ES9080Q_REG_NSMOD_DITH_56	0x85
+#define ES9080Q_REG_NSMOD_DITH_78	0x86
 
-#define ES9080Q_REG_DRE_CTRL		0x88	/* reg 136 */
-#define ES9080Q_REG_GAIN_18DB		0x9A	/* reg 154: per-channel 18dB boost */
+#define ES9080Q_REG_DRE_CTRL		0x88
 
 /* Write-only registers (secondary I2C address = primary + 4) */
-#define ES9080Q_REG_RESET_PLL1		0xC0	/* reg 192: soft reset + PLL reg 1 */
-#define ES9080Q_REG_PLL_CONFIG		0xC1	/* reg 193: GPIO1 mode, PLL bypass */
-#define ES9080Q_REG_PLL_PARAMS		0xCA	/* reg 202: PLL parameters */
+#define ES9080Q_REG_RESET_PLL1		0xC0
+#define ES9080Q_REG_PLL_CONFIG		0xC1
+#define ES9080Q_REG_PLL_PARAMS		0xCA
+
+/* Register range limits */
+#define ES9080Q_MAX_REG			0xFF
+#define ES9080Q_WO_REG_MIN		0xC0
+#define ES9080Q_WO_REG_MAX		0xCB
 
 /* Bit definitions */
 #define ES9080Q_AMP_ON			0x02
@@ -126,291 +125,210 @@
 #define ES9080Q_ALL_CH_EN		0xFF
 #define ES9080Q_TDM_DECODER_EN		0x01
 #define ES9080Q_FORCE_PLL_LOCK		0x80
-#define ES9080Q_SOFT_RESET		0xC0	/* AO_SOFT_RESET | PLL_SOFT_RESET */
-
-/* ES9080Q_REG_INPUT_CONFIG bits */
-#define ES9080Q_MASTER_MODE_EN		BIT(4)
 #define ES9080Q_INPUT_SEL_TDM		(0 << 2)
-
-/* ES9080Q_REG_TDM_CONFIG2 bits */
 #define ES9080Q_TDM_LJ_MODE		BIT(7)
 #define ES9080Q_TDM_VALID_PULSE_8	0x08
-
-/* ES9080Q_REG_TDM_CONFIG3 bit width encoding */
 #define ES9080Q_TDM_32BIT		(0 << 6)
-#define ES9080Q_TDM_24BIT		(1 << 6)
-#define ES9080Q_TDM_16BIT		(2 << 6)
-
-/* ES9080Q_REG_VOL_CTRL bits */
 #define ES9080Q_FORCE_VOLUME		BIT(6)
 
-/* ------------------------------------------------------------------ */
-/* Private driver state                                                */
-/* ------------------------------------------------------------------ */
+/* Private driver state */
 
 struct es9080q_priv {
-	struct i2c_client	*i2c;		/* primary (R/W) address */
-	struct i2c_client	*i2c_wo;	/* write-only address */
+	struct i2c_client	*i2c;
+	struct i2c_client	*i2c_wo;
+	struct regmap		*regmap;
+	struct regmap		*regmap_wo;
 	struct gpio_desc	*reset_gpio;
-	unsigned int		 sysclk;
-	unsigned int		 fmt;
 };
 
-/* ------------------------------------------------------------------ */
-/* Low-level I2C register access                                       */
-/*                                                                     */
-/* The ES9080Q uses two I2C addresses:                                 */
-/*   primary (R/W): regs 0–164 and 224–255                            */
-/*   secondary (write-only): regs 192–203                             */
-/* ------------------------------------------------------------------ */
+/* regmap configurations */
 
-static struct i2c_client *es9080q_client_for_reg(struct es9080q_priv *es,
-						  u8 reg, bool write)
+static bool es9080q_readable_reg(struct device *dev, unsigned int reg)
 {
-	/* Write-only registers 192–203 go to secondary address */
-	if (reg >= 192 && reg <= 203 && write)
-		return es->i2c_wo ? es->i2c_wo : es->i2c;
-
-	/* Everything else goes to primary address */
-	return es->i2c;
+	/* Write-only range 192-203 is not readable via primary address */
+	if (reg >= ES9080Q_WO_REG_MIN && reg <= ES9080Q_WO_REG_MAX)
+		return false;
+	return true;
 }
 
-static int es9080q_write(struct es9080q_priv *es, u8 reg, u8 val)
+static bool es9080q_writeable_reg(struct device *dev, unsigned int reg)
 {
-	struct i2c_client *client = es9080q_client_for_reg(es, reg, true);
-	u8 buf[2] = { reg, val };
-	int ret;
-
-	ret = i2c_master_send(client, buf, 2);
-	if (ret < 0)
-		return ret;
-	return ret == 2 ? 0 : -EIO;
+	/* Read-only range 224-255 */
+	if (reg >= 0xE0)
+		return false;
+	/* Write-only range is handled by the secondary regmap */
+	if (reg >= ES9080Q_WO_REG_MIN && reg <= ES9080Q_WO_REG_MAX)
+		return false;
+	return true;
 }
 
-static int es9080q_read(struct es9080q_priv *es, u8 reg, u8 *val)
+static const struct regmap_config es9080q_regmap_config = {
+	.reg_bits	= 8,
+	.val_bits	= 8,
+	.max_register	= ES9080Q_MAX_REG,
+	.readable_reg	= es9080q_readable_reg,
+	.writeable_reg	= es9080q_writeable_reg,
+	.cache_type	= REGCACHE_NONE,
+};
+
+static bool es9080q_wo_writeable_reg(struct device *dev, unsigned int reg)
 {
-	struct i2c_client *client = es9080q_client_for_reg(es, reg, false);
-	int ret;
-
-	ret = i2c_master_send(client, &reg, 1);
-	if (ret < 0)
-		return ret;
-
-	ret = i2c_master_recv(client, val, 1);
-	if (ret < 0)
-		return ret;
-
-	return ret == 1 ? 0 : -EIO;
+	return reg >= ES9080Q_WO_REG_MIN && reg <= ES9080Q_WO_REG_MAX;
 }
 
-/* snd_soc_component read/write callbacks used by DAPM and controls */
-static int es9080q_component_write(struct snd_soc_component *component,
-				   unsigned int reg, unsigned int val)
+static bool es9080q_wo_readable_reg(struct device *dev, unsigned int reg)
 {
-	struct es9080q_priv *es = snd_soc_component_get_drvdata(component);
-
-	return es9080q_write(es, (u8)reg, (u8)val);
+	return false;
 }
 
-static unsigned int es9080q_component_read(struct snd_soc_component *component,
-					   unsigned int reg)
-{
-	struct es9080q_priv *es = snd_soc_component_get_drvdata(component);
-	u8 val;
-	int ret;
+static const struct regmap_config es9080q_wo_regmap_config = {
+	.reg_bits	= 8,
+	.val_bits	= 8,
+	.max_register	= ES9080Q_WO_REG_MAX,
+	.readable_reg	= es9080q_wo_readable_reg,
+	.writeable_reg	= es9080q_wo_writeable_reg,
+	.cache_type	= REGCACHE_NONE,
+};
 
-	ret = es9080q_read(es, (u8)reg, &val);
-	if (ret < 0)
-		return (unsigned int)ret;
-	return val;
+/* Register write helper — selects primary or write-only regmap */
+
+static int es9080q_write(struct es9080q_priv *es, unsigned int reg,
+			 unsigned int val)
+{
+	if (reg >= ES9080Q_WO_REG_MIN && reg <= ES9080Q_WO_REG_MAX)
+		return regmap_write(es->regmap_wo, reg, val);
+	return regmap_write(es->regmap, reg, val);
 }
 
-/* ------------------------------------------------------------------ */
-/* Hardware initialisation sequence                                    */
-/*                                                                     */
-/* Derived from Es9080_Codec.cpp startAudio() in bela-org-info.       */
-/* The ES9080Q on Bela Gem Multi is always TDM slave — clocks come    */
-/* from the TLV320AIC3106.                                            */
-/* ------------------------------------------------------------------ */
+/* Hardware initialisation sequence */
 
 static int es9080q_hw_init(struct es9080q_priv *es)
 {
 	int ret;
 	int i;
 
-	/* Assert/deassert hardware reset if GPIO is available */
 	if (es->reset_gpio) {
 		gpiod_set_value_cansleep(es->reset_gpio, 0);
-		msleep(10);
+		usleep_range(10000, 15000);
 		gpiod_set_value_cansleep(es->reset_gpio, 1);
-		msleep(10);
+		usleep_range(10000, 15000);
 	}
 
-	/*
-	 * Step 1: PLL/GPIO registers (write-only address)
-	 * Set GPIO1 (MCLK) pad to input mode, invert CLKHV for better DNR
-	 */
+	/* PLL/GPIO registers via write-only address */
 	ret = es9080q_write(es, ES9080Q_REG_RESET_PLL1, 0x03);
 	if (ret)
 		return ret;
 
-	/* PLL bypass, remove DVDD shunt, set PLL input to MCLK */
 	ret = es9080q_write(es, ES9080Q_REG_PLL_CONFIG, 0xC3);
 	if (ret)
 		return ret;
 
-	/* PLL parameters */
 	ret = es9080q_write(es, ES9080Q_REG_PLL_PARAMS, 0x40);
 	if (ret)
 		return ret;
 
-	/*
-	 * Step 2: Core registers (primary address)
-	 * Enable interpolation and modulator clocks for all 8 channels
-	 */
+	/* Core registers via primary address */
 	ret = es9080q_write(es, ES9080Q_REG_INTERP_MOD_CLK, ES9080Q_ALL_CH_EN);
 	if (ret)
 		return ret;
 
-	/* Enable TDM decoder */
 	ret = es9080q_write(es, ES9080Q_REG_TDM_DECODER, ES9080Q_TDM_DECODER_EN);
 	if (ret)
 		return ret;
 
-	/*
-	 * DAC config: SELECT_IDAC_NUM
-	 * For 256-bit frame with MCLK = 256*Fs: IDAC = (256/128) - 1 = 1
-	 */
 	ret = es9080q_write(es, ES9080Q_REG_DAC_CONFIG, 0x01);
 	if (ret)
 		return ret;
 
-	/*
-	 * Master clock config: SELECT_MENC_NUM
-	 * Slave mode: this still sets the internal decoder reference.
-	 * MCLK_OVER_BCK = 2, MASTER_BCK_DIV1 = 1
-	 * divide_value_menc = 2 / 1 = 2, SELECT_MENC_NUM = 2 - 1 = 1
-	 */
 	ret = es9080q_write(es, ES9080Q_REG_MASTER_CLK, 0x01);
 	if (ret)
 		return ret;
 
-	/*
-	 * Charge pump clock divider
-	 * CP clock = SYS_CLK / ((CP_CLK_DIV + 1) * 2)
-	 * Target: 500 kHz – 1 MHz. For 12 MHz MCLK:
-	 * CP_CLK_DIV = 5 → 12M / (6*2) = 1 MHz
-	 */
 	ret = es9080q_write(es, ES9080Q_REG_CP_CLK_DIV, 0x05);
 	if (ret)
 		return ret;
 
-	/* Enable all 8 channels analog section */
 	ret = es9080q_write(es, ES9080Q_REG_ANALOG_EN, ES9080Q_ALL_CH_EN);
 	if (ret)
 		return ret;
 
-	/* Analog delay sequence for quiet pop */
 	ret = es9080q_write(es, ES9080Q_REG_ANALOG_DELAY, 0xBB);
 	if (ret)
 		return ret;
 
-	/* Force PLL lock signal (PLL is bypassed) */
 	ret = es9080q_write(es, ES9080Q_REG_PLL_LOCK, ES9080Q_FORCE_PLL_LOCK);
 	if (ret)
 		return ret;
 
-	/*
-	 * Step 3: TDM configuration
-	 * Slave mode (no MASTER_MODE_EN), TDM input selected
-	 */
-	ret = es9080q_write(es, ES9080Q_REG_INPUT_CONFIG,
-			    ES9080Q_INPUT_SEL_TDM);
+	/* TDM configuration — slave mode */
+	ret = es9080q_write(es, ES9080Q_REG_INPUT_CONFIG, ES9080Q_INPUT_SEL_TDM);
 	if (ret)
 		return ret;
 
-	/*
-	 * TDM CONFIG1: 8 TDM slots per frame (TDM_CH_NUM = 7)
-	 * MASTER_WS_SCALE = 0 (not in master mode, but set for consistency)
-	 */
 	ret = es9080q_write(es, ES9080Q_REG_TDM_CONFIG1, 0x07);
 	if (ret)
 		return ret;
 
-	/* TDM CONFIG2: Left justified, negative valid edge, 8-slot pulse */
 	ret = es9080q_write(es, ES9080Q_REG_TDM_CONFIG2,
 			    ES9080Q_TDM_LJ_MODE | ES9080Q_TDM_VALID_PULSE_8);
 	if (ret)
 		return ret;
 
-	/* TDM CONFIG3: 32-bit slot width, no daisy chain */
 	ret = es9080q_write(es, ES9080Q_REG_TDM_CONFIG3, ES9080Q_TDM_32BIT);
 	if (ret)
 		return ret;
 
-	/* Disable BCK/WS monitor */
 	ret = es9080q_write(es, ES9080Q_REG_BCK_WS_MON, 0x00);
 	if (ret)
 		return ret;
 
-	/* TDM valid pulse position = 0 */
 	ret = es9080q_write(es, ES9080Q_REG_TDM_VALID_PULSE, 0x00);
 	if (ret)
 		return ret;
 
-	/*
-	 * TDM channel-to-slot mapping: CH1→slot0, CH2→slot1, ..., CH8→slot7
-	 * All channels on DATA line 1 (TDM_CHx_LINE_SEL = 0)
-	 */
+	/* CH1-CH8 to slots 0-7, all on DATA line 1 */
 	for (i = 0; i < 8; i++) {
 		ret = es9080q_write(es, ES9080Q_REG_TDM_CH1_CFG + i, i);
 		if (ret)
 			return ret;
 	}
 
-	/*
-	 * Step 4: Filter and dither configuration
-	 */
-	/* Minimum phase slow roll-off filter, no de-emphasis */
+	/* Filter and dither */
 	ret = es9080q_write(es, ES9080Q_REG_FILTER_CFG, 0x46);
 	if (ret)
 		return ret;
 
-	/* IIR filter dither for best low-level linearity */
 	ret = es9080q_write(es, ES9080Q_REG_DITHER_CFG, 0xE4);
 	if (ret)
 		return ret;
 
-	/* THD compensation coefficients */
-	ret = es9080q_write(es, ES9080Q_REG_THD_C2_ODD, 0x68);
+	ret = es9080q_write(es, ES9080Q_REG_THD_C2_ODD,  0x68);
 	if (ret)
 		return ret;
 	ret = es9080q_write(es, ES9080Q_REG_THD_C2H_ODD, 0x01);
 	if (ret)
 		return ret;
-	ret = es9080q_write(es, ES9080Q_REG_THD_C3_ODD, 0x8D);
+	ret = es9080q_write(es, ES9080Q_REG_THD_C3_ODD,  0x8D);
 	if (ret)
 		return ret;
-	ret = es9080q_write(es, ES9080Q_REG_THD_C2_EVEN, 0x68);
+	ret = es9080q_write(es, ES9080Q_REG_THD_C2_EVEN,  0x68);
 	if (ret)
 		return ret;
 	ret = es9080q_write(es, ES9080Q_REG_THD_C2H_EVEN, 0x01);
 	if (ret)
 		return ret;
-	ret = es9080q_write(es, ES9080Q_REG_THD_C3_EVEN, 0x8D);
+	ret = es9080q_write(es, ES9080Q_REG_THD_C3_EVEN,  0x8D);
 	if (ret)
 		return ret;
 
-	/* Disable automute */
 	ret = es9080q_write(es, ES9080Q_REG_AUTOMUTE, 0x00);
 	if (ret)
 		return ret;
 
-	/* NSMOD dither for best performance */
-	ret = es9080q_write(es, ES9080Q_REG_NSMOD_PHASE, 0xCC);
+	ret = es9080q_write(es, ES9080Q_REG_NSMOD_PHASE,   0xCC);
 	if (ret)
 		return ret;
-	ret = es9080q_write(es, ES9080Q_REG_NSMOD_TYPE, 0x54);
+	ret = es9080q_write(es, ES9080Q_REG_NSMOD_TYPE,    0x54);
 	if (ret)
 		return ret;
 	ret = es9080q_write(es, ES9080Q_REG_NSMOD_DITH_12, 0x44);
@@ -426,15 +344,14 @@ static int es9080q_hw_init(struct es9080q_priv *es)
 	if (ret)
 		return ret;
 
-	/* DRE: volume-dependent gain off for now */
 	ret = es9080q_write(es, ES9080Q_REG_DRE_CTRL, 0x00);
 	if (ret)
 		return ret;
 
 	/*
-	 * Step 5: DAC clock resync — 3 sequential writes required
-	 * Aligns all clocks in the DAC core for best analog performance
-	 */
+	 * DAC clock resync — 3 sequential writes required to align
+	 * all clocks in the DAC core for best analog performance.
+ */
 	ret = es9080q_write(es, ES9080Q_REG_DAC_RESYNC, 0x10);
 	if (ret)
 		return ret;
@@ -445,18 +362,12 @@ static int es9080q_hw_init(struct es9080q_priv *es)
 	if (ret)
 		return ret;
 
-	/*
-	 * Step 6: Turn on amplifier
-	 * This runs a state machine to gracefully power up the DACs.
-	 */
+	/* Power up amplifier */
 	ret = es9080q_write(es, ES9080Q_REG_AMP_CTRL, ES9080Q_AMP_ON);
 	if (ret)
 		return ret;
 
-	/*
-	 * Step 7: Volume control — force immediate volume updates,
-	 * set all channels to 0 dB
-	 */
+	/* Force immediate volume updates; set all channels to 0 dB */
 	ret = es9080q_write(es, ES9080Q_REG_VOL_CTRL, ES9080Q_FORCE_VOLUME);
 	if (ret)
 		return ret;
@@ -471,29 +382,26 @@ static int es9080q_hw_init(struct es9080q_priv *es)
 	return 0;
 }
 
-/* ------------------------------------------------------------------ */
-/* Component probe                                                     */
-/* ------------------------------------------------------------------ */
+/* Component probe */
 
 static int es9080q_probe(struct snd_soc_component *component)
 {
 	struct es9080q_priv *es = snd_soc_component_get_drvdata(component);
-
-	/*
-	 * Verify the device is present by reading a known register.
-	 * Reg 0 (AMP_CTRL) should be readable at the primary address.
-	 * The ES9080Q has no dedicated chip ID register.
-	 */
-	u8 val;
+	unsigned int val;
 	int ret;
 
-	ret = es9080q_read(es, ES9080Q_REG_AMP_CTRL, &val);
+	/*
+	 * Verify device presence by reading AMP_CTRL (reg 0).
+	 * The ES9080Q has no dedicated chip ID register.
+ */
+	ret = regmap_read(es->regmap, ES9080Q_REG_AMP_CTRL, &val);
 	if (ret) {
 		dev_err(component->dev,
 			"failed to read ES9080Q at I2C 0x%02x: %d\n",
 			es->i2c->addr, ret);
 		return ret;
 	}
+
 	dev_info(component->dev,
 		 "ES9080Q detected at I2C 0x%02x (R/W) + 0x%02x (W/O)\n",
 		 es->i2c->addr,
@@ -502,9 +410,7 @@ static int es9080q_probe(struct snd_soc_component *component)
 	return es9080q_hw_init(es);
 }
 
-/* ------------------------------------------------------------------ */
-/* DAI operations                                                      */
-/* ------------------------------------------------------------------ */
+/* DAI operations */
 
 static int es9080q_hw_params(struct snd_pcm_substream *substream,
 			     struct snd_pcm_hw_params *params,
@@ -512,8 +418,8 @@ static int es9080q_hw_params(struct snd_pcm_substream *substream,
 {
 	/*
 	 * ES9080Q locks to BCLK/WCLK automatically in slave mode.
-	 * The TDM configuration is set statically in es9080q_hw_init().
-	 */
+	 * TDM configuration is static — set in es9080q_hw_init().
+ */
 	dev_dbg(dai->dev, "hw_params: rate=%u channels=%u\n",
 		params_rate(params), params_channels(params));
 	return 0;
@@ -521,15 +427,10 @@ static int es9080q_hw_params(struct snd_pcm_substream *substream,
 
 static int es9080q_set_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 {
-	struct es9080q_priv *es = snd_soc_component_get_drvdata(dai->component);
-
-	es->fmt = fmt;
-
 	/*
-	 * ES9080Q on Bela is always TDM slave — BCLK and WCLK come from
-	 * TLV320AIC3106. Accept DSP_B (TDM with 1-bit offset) which is
-	 * what the Bela hardware uses.
-	 */
+	 * ES9080Q on Bela Gem Multi is always TDM slave, clocked by
+	 * TLV320AIC3106. Only DSP_B (TDM with 1-bit offset) is used.
+ */
 	switch (fmt & SND_SOC_DAIFMT_FORMAT_MASK) {
 	case SND_SOC_DAIFMT_DSP_B:
 		break;
@@ -544,13 +445,6 @@ static int es9080q_set_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 static int es9080q_set_sysclk(struct snd_soc_dai *dai, int clk_id,
 			      unsigned int freq, int dir)
 {
-	struct es9080q_priv *es = snd_soc_component_get_drvdata(dai->component);
-
-	/*
-	 * ES9080Q derives timing from BCLK/WCLK directly in slave mode.
-	 * Store for reference only.
-	 */
-	es->sysclk = freq;
 	return 0;
 }
 
@@ -558,12 +452,8 @@ static int es9080q_mute_stream(struct snd_soc_dai *dai, int mute, int direction)
 {
 	struct es9080q_priv *es = snd_soc_component_get_drvdata(dai->component);
 
-	/*
-	 * Mute/unmute by controlling the amplifier.
-	 * AMP_CTRL reg 0: 0x02 = on, 0x00 = off.
-	 */
-	return es9080q_write(es, ES9080Q_REG_AMP_CTRL,
-			     mute ? ES9080Q_AMP_OFF : ES9080Q_AMP_ON);
+	return regmap_write(es->regmap, ES9080Q_REG_AMP_CTRL,
+			    mute ? ES9080Q_AMP_OFF : ES9080Q_AMP_ON);
 }
 
 static const struct snd_soc_dai_ops es9080q_dai_ops = {
@@ -574,9 +464,7 @@ static const struct snd_soc_dai_ops es9080q_dai_ops = {
 	.no_capture_mute = 1,
 };
 
-/* ------------------------------------------------------------------ */
-/* DAI driver — playback only (ES9080Q is a DAC, no capture path)     */
-/* ------------------------------------------------------------------ */
+/* DAI driver */
 
 static struct snd_soc_dai_driver es9080q_dai = {
 	.name = "es9080q-hifi",
@@ -591,13 +479,11 @@ static struct snd_soc_dai_driver es9080q_dai = {
 	.ops = &es9080q_dai_ops,
 };
 
-/* ------------------------------------------------------------------ */
-/* DAPM widgets, routes, and mixer controls                            */
-/* ------------------------------------------------------------------ */
+/* DAPM and mixer controls */
 
 /*
- * Volume TLV: 0 dB to −127.5 dB in 0.5 dB steps.
- * Register value = attenuation in half-dB units (0 = 0 dB, 255 = −127.5 dB).
+ * Volume TLV: 0 dB to -127.5 dB in 0.5 dB steps.
+ * Register value = attenuation in half-dB units (0 = 0 dB, 255 = -127.5 dB).
  */
 static const DECLARE_TLV_DB_SCALE(es9080q_vol_tlv, -12750, 50, 0);
 
@@ -638,14 +524,8 @@ static const struct snd_soc_dapm_route es9080q_dapm_routes[] = {
 	{ "OUT8", NULL, "DAC CH7-8" },
 };
 
-/* ------------------------------------------------------------------ */
-/* Component driver struct                                             */
-/* ------------------------------------------------------------------ */
-
 static const struct snd_soc_component_driver es9080q_component_driver = {
 	.probe			= es9080q_probe,
-	.read			= es9080q_component_read,
-	.write			= es9080q_component_write,
 	.controls		= es9080q_controls,
 	.num_controls		= ARRAY_SIZE(es9080q_controls),
 	.dapm_widgets		= es9080q_dapm_widgets,
@@ -657,9 +537,7 @@ static const struct snd_soc_component_driver es9080q_component_driver = {
 	.endianness		= 1,
 };
 
-/* ------------------------------------------------------------------ */
-/* I2C driver                                                          */
-/* ------------------------------------------------------------------ */
+/* I2C driver */
 
 static int es9080q_i2c_probe(struct i2c_client *i2c)
 {
@@ -673,36 +551,47 @@ static int es9080q_i2c_probe(struct i2c_client *i2c)
 	es->i2c = i2c;
 	i2c_set_clientdata(i2c, es);
 
+	es->regmap = devm_regmap_init_i2c(i2c, &es9080q_regmap_config);
+	if (IS_ERR(es->regmap))
+		return dev_err_probe(&i2c->dev, PTR_ERR(es->regmap),
+				     "failed to init primary regmap\n");
+
 	/*
 	 * Set up the write-only I2C client for PLL/reset registers.
-	 * The DT property "ess,write-only-addr" specifies the secondary
-	 * I2C address (typically primary + 4, e.g. 0x48 → 0x4C).
-	 */
+	 * "ess,write-only-addr" specifies the secondary address (primary + 4).
+ */
 	if (!of_property_read_u32(i2c->dev.of_node, "ess,write-only-addr",
 				  &wo_addr)) {
 		es->i2c_wo = devm_i2c_new_dummy_device(&i2c->dev,
-							i2c->adapter,
-							wo_addr);
-		if (IS_ERR(es->i2c_wo)) {
+						       i2c->adapter,
+						       wo_addr);
+		if (IS_ERR(es->i2c_wo))
 			return dev_err_probe(&i2c->dev, PTR_ERR(es->i2c_wo),
 					     "failed to create write-only I2C client at 0x%02x\n",
 					     wo_addr);
-		}
+
+		es->regmap_wo = devm_regmap_init_i2c(es->i2c_wo,
+						     &es9080q_wo_regmap_config);
+		if (IS_ERR(es->regmap_wo))
+			return dev_err_probe(&i2c->dev, PTR_ERR(es->regmap_wo),
+					     "failed to init write-only regmap\n");
+
 		dev_info(&i2c->dev,
 			 "ES9080Q: primary 0x%02x, write-only 0x%02x\n",
 			 i2c->addr, wo_addr);
 	} else {
 		dev_warn(&i2c->dev,
 			 "ES9080Q: no write-only addr, PLL config unavailable\n");
+		/* Point write-only regmap at primary to avoid NULL deref */
+		es->regmap_wo = es->regmap;
 	}
 
 	/*
-	 * CHIP_EN / reset GPIO — optional. If the schematic does not wire
-	 * a GPIO to CHIP_EN, devm_gpiod_get_optional() returns NULL and
-	 * the driver proceeds without hardware reset.
-	 */
+	 * Optional CHIP_EN / reset GPIO. If not wired, driver proceeds
+	 * without hardware reset.
+ */
 	es->reset_gpio = devm_gpiod_get_optional(&i2c->dev, "reset",
-						  GPIOD_OUT_HIGH);
+						 GPIOD_OUT_HIGH);
 	if (IS_ERR(es->reset_gpio))
 		return dev_err_probe(&i2c->dev, PTR_ERR(es->reset_gpio),
 				     "failed to get reset GPIO\n");
