@@ -44,5 +44,5 @@ obj-$(CONFIG_SND_SOC_OMAP_AMS_DELTA) += snd-soc-ams-delta.o
 obj-$(CONFIG_SND_SOC_OMAP_HDMI) += snd-soc-omap-hdmi.o
 obj-$(CONFIG_SND_SOC_OMAP_OSK5912) += snd-soc-osk5912.o
 obj-$(CONFIG_SND_SOC_J721E_EVM) += snd-soc-j721e-evm.o
-snd-soc-am62x-bela-y := bela.o
-obj-$(CONFIG_SND_SOC_AM62X_BELA) += snd-soc-am62x-bela.o
+snd-soc-am625-bela-gem-y := am625-bela-gem.o
+obj-$(CONFIG_SND_SOC_AM625_BELA_GEM) += snd-soc-am625-bela-gem.o

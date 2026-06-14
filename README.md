@@ -11,21 +11,30 @@ Two cape variants are targeted:
 | **Bela Gem Stereo** | TLV320AIC3106 | 2-ch playback + 2-ch capture |
 | **Bela Gem Multi** | TLV320AIC3106 + ES9080Q + 2× TLV320ADC3140 | 10-ch playback + 10-ch capture |
 
-All audio flows over a single McASP2 instance. The TLV320AIC3106 is the BCLK/WCLK
-master for the whole frame; every other codec is a clock slave.
+All audio flows over a single McASP2 instance carrying one 8-slot × 32-bit TDM
+frame. In the Multi machine driver the McASP2 is the BCLK/WCLK (frame) master and
+every codec is a clock consumer; all codecs take their MCLK from the SoC
+`AUDIO_EXT_REFCLK1` output. (The cape hardware is also wired for the TLV320AIC3106
+to master the frame, as Bela's downstream userspace driver does.)
 
 ## Status
 
 | Component | State |
 |-----------|-------|
 | Stereo overlay (upstream `simple-audio-card` + `tlv320aic3x`) | **Validated on hardware** — playback and capture working |
-| ES9080Q codec driver (`es9080q.c`) | Register map + dual-I2C verified against Bela userspace driver; builds clean; pending on-hardware bring-up |
-| Multi machine driver (`am625-bela-gem.c`) | AM62x driver written, builds clean, probes; pending on-hardware bring-up |
-| Multi overlay | Builds clean; codecs ACK on I2C except ES9080Q (see hardware note) |
+| Multi card — stereo path (TLV320AIC3106) | **Working on hardware** — the `BelaGemMulti` card registers and stereo playback + capture are clean |
+| ES9080Q codec driver (`es9080q.c`) | Register map + dual-I2C verified against Bela userspace driver; builds clean; card registers, init deferred to first stream; **8-ch DAC stream pending** (see hardware note) |
+| ADC3140 capture | Codecs probe; **capture pending** (see hardware note) |
+| Multi machine driver (`am625-bela-gem.c`) | Builds clean; registers the four-codec card; stereo validated |
+| Multi overlay | Builds clean; all four codecs probe and ACK on I2C |
 
-**Hardware note (Multi):** the ES9080Q (`0x48`) does not appear on I2C until the
-board-level solder jumper **JP8** (ES9080Q `CHIP_EN` → +3V3) is bridged. Until then
-the Multi card will not register.
+**Hardware note (Multi):** the ES9080Q and the ADC3140s NAK their I2C register
+ports (`-EREMOTEIO`) when a stream starts, because those parts require a running
+MCLK while the TLV320AIC3106 (a clock consumer) does not. JP8 (ES9080Q `CHIP_EN`
+→ +3V3) is bridged and is **not** the cause. The remaining task is to confirm —
+with a scope/meter — that the ~24 MHz MCLK on `AUDIO_EXT_REFCLK1` (P2.11) actually
+reaches the ES9080Q and ADC3140 MCLK pins through the on-cape `AUX_MCLK` /
+`ADC3140_MCLK` series resistors.
 
 ### Known gaps before upstream submission
 
@@ -36,7 +45,8 @@ the Multi card will not register.
   series is sent.
 - The legacy AM335x machine driver `driver/sound/soc/ti/bela.c` is kept as a
   reference only; it is not part of the AM62x target and is not built.
-- On-hardware validation of the Multi card is blocked on JP8 (above).
+- The ES9080Q 8-ch playback and ADC3140 capture paths await the MCLK-delivery
+  check described in the hardware note.
 
 ## Repository layout
 
@@ -78,15 +88,15 @@ the direction validated on hardware with the Stereo cape.
 | ES9080Q data | P1.04 | AXR6 | TX — SoC → ES9080Q (8-ch, single data line) |
 | ADC3140 #1 data | P1.02 | AXR4 | RX — ADC3140 #1 → SoC (Multi only) |
 | ADC3140 #2 data | P2.31 | AXR8 | RX — ADC3140 #2 → SoC (Multi only) |
-| AUD_WCLK | P2.10 | AFSX  | Input (codec-driven) |
-| AUD_BCLK | P2.19 | ACLKX | Input (codec-driven) |
+| AUD_WCLK | P2.10 | AFSX  | Output (McASP-driven, frame master) |
+| AUD_BCLK | P2.19 | ACLKX | Output (McASP-driven, bit-clock master) |
 | AUD_MCLK | P2.11 | AUDIO_EXT_REFCLK1 | Output (~24 MHz) |
 
 > Bela's downstream `PB2-BELA.dtso` uses the reverse mapping (`serial-dir = <2 1>`).
 > This repository deliberately keeps `<1 2>` because it is the direction confirmed
 > working on hardware. Do not flip it without re-validating on a board.
 
-### I2C devices (`main_i2c1`, exposed as `/dev/i2c-2`)
+### I2C devices (`main_i2c1`; bus number varies — check `i2cdetect -l`)
 
 | Device | Address | Role |
 |--------|---------|------|

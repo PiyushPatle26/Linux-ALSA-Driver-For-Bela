@@ -33,6 +33,7 @@
 #include <linux/delay.h>
 #include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
+#include <linux/clk.h>
 #include <linux/module.h>
 #include <linux/regmap.h>
 #include <sound/soc.h>
@@ -139,6 +140,8 @@ struct es9080q_priv {
 	struct regmap		*regmap;
 	struct regmap		*regmap_wo;
 	struct gpio_desc	*reset_gpio;
+	struct clk		*mclk;
+	bool			hw_inited;
 };
 
 /* regmap configurations */
@@ -168,7 +171,15 @@ static const struct regmap_config es9080q_regmap_config = {
 	.max_register	= ES9080Q_MAX_REG,
 	.readable_reg	= es9080q_readable_reg,
 	.writeable_reg	= es9080q_writeable_reg,
-	.cache_type	= REGCACHE_NONE,
+	/*
+	 * Use a flat cache so control reads (e.g. amixer enumerating the
+	 * volume controls) are served from the cache instead of hitting the
+	 * chip. The ES9080Q's I2C port is dead until it is clocked and
+	 * initialised, and a NAK storm on this shared bus also breaks the
+	 * other codecs (TLV320AIC3106). The driver keeps the map cache-only
+	 * until es9080q_hw_init() runs on the first stream.
+	 */
+	.cache_type	= REGCACHE_FLAT,
 };
 
 static bool es9080q_wo_writeable_reg(struct device *dev, unsigned int reg)
@@ -387,27 +398,20 @@ static int es9080q_hw_init(struct es9080q_priv *es)
 static int es9080q_probe(struct snd_soc_component *component)
 {
 	struct es9080q_priv *es = snd_soc_component_get_drvdata(component);
-	unsigned int val;
-	int ret;
 
 	/*
-	 * Verify device presence by reading AMP_CTRL (reg 0).
-	 * The ES9080Q has no dedicated chip ID register.
- */
-	ret = regmap_read(es->regmap, ES9080Q_REG_AMP_CTRL, &val);
-	if (ret) {
-		dev_err(component->dev,
-			"failed to read ES9080Q at I2C 0x%02x: %d\n",
-			es->i2c->addr, ret);
-		return ret;
-	}
+	 * The register port is inaccessible until the master clock is running.
+	 * No codec is clocked at component-probe (no DAI link is active), so an
+	 * I2C access here would NAK (-EREMOTEIO) and tear down the card. Defer
+	 * the hardware init to the first hw_params(), once the TDM frame and
+	 * master clock are up.
+	 */
+	es->hw_inited = false;
+	dev_dbg(component->dev,
+		"registered at I2C 0x%02x (R/W) + 0x%02x (W/O); init deferred to stream start\n",
+		es->i2c->addr, es->i2c_wo ? es->i2c_wo->addr : 0);
 
-	dev_info(component->dev,
-		 "ES9080Q detected at I2C 0x%02x (R/W) + 0x%02x (W/O)\n",
-		 es->i2c->addr,
-		 es->i2c_wo ? es->i2c_wo->addr : 0);
-
-	return es9080q_hw_init(es);
+	return 0;
 }
 
 /* DAI operations */
@@ -416,12 +420,39 @@ static int es9080q_hw_params(struct snd_pcm_substream *substream,
 			     struct snd_pcm_hw_params *params,
 			     struct snd_soc_dai *dai)
 {
-	/*
-	 * ES9080Q locks to BCLK/WCLK automatically in slave mode.
-	 * TDM configuration is static — set in es9080q_hw_init().
- */
+	struct es9080q_priv *es = snd_soc_component_get_drvdata(dai->component);
+	int ret;
+
 	dev_dbg(dai->dev, "hw_params: rate=%u channels=%u\n",
 		params_rate(params), params_channels(params));
+
+	/*
+	 * Run the one-time hardware init on the first stream rather than at
+	 * probe: the register port is only accessible once the master clock is
+	 * running, which requires the shared TDM frame to be active.
+	 * es9080q_hw_init() issues the write-only PLL/reset writes first, which
+	 * also bring up the R/W port.
+	 */
+	if (!es->hw_inited) {
+		regcache_cache_only(es->regmap, false);
+
+		ret = es9080q_hw_init(es);
+		if (ret) {
+			/*
+			 * Return to cache-only so later control accesses do not
+			 * repeatedly NAK on the shared bus while the master clock
+			 * is absent.
+			 */
+			regcache_cache_only(es->regmap, true);
+			dev_err(dai->dev,
+				"hardware init failed at I2C 0x%02x: %d (master clock running?)\n",
+				es->i2c->addr, ret);
+			return ret;
+		}
+		es->hw_inited = true;
+	}
+
+	/* The DAC locks to BCLK/WCLK automatically as a TDM consumer. */
 	return 0;
 }
 
@@ -555,6 +586,24 @@ static int es9080q_i2c_probe(struct i2c_client *i2c)
 	if (IS_ERR(es->regmap))
 		return dev_err_probe(&i2c->dev, PTR_ERR(es->regmap),
 				     "failed to init primary regmap\n");
+
+	/*
+	 * Serve register access from the cache until the chip is clocked and
+	 * initialised (cleared in es9080q_hw_init() on the first stream). This
+	 * keeps control-read NAKs off the shared I2C bus, where they would also
+	 * disturb the other codecs.
+	 */
+	regcache_cache_only(es->regmap, true);
+
+	/*
+	 * The register interface is inaccessible until the master clock is
+	 * running. Enable the optional "mclk" so it is up before the init
+	 * sequence; a board may instead gate this clock from the machine driver.
+	 */
+	es->mclk = devm_clk_get_optional_enabled(&i2c->dev, "mclk");
+	if (IS_ERR(es->mclk))
+		return dev_err_probe(&i2c->dev, PTR_ERR(es->mclk),
+				     "failed to get/enable mclk\n");
 
 	/*
 	 * Set up the write-only I2C client for PLL/reset registers.

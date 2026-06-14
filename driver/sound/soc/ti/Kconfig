@@ -192,20 +192,16 @@ config SND_SOC_J721E_EVM
 	  Say Y if you want to add support for SoC audio on j721e Common
 	  Processor Board and Infotainment expansion board.
 
-config SND_SOC_AM62X_BELA
-	tristate "AM62x Bela audio support"
+config SND_SOC_AM625_BELA_GEM
+	tristate "Bela Gem Multi audio cape for AM625"
 	depends on ARCH_K3 || COMPILE_TEST
-	depends on SND_SOC
-	select SND_SOC_TLV320AIC3X_I2C
+	depends on SND_SOC_DAVINCI_MCASP && I2C
+	select SND_SOC_TLV320AIC3X
 	select SND_SOC_ES9080Q
-	select SND_SOC_DAVINCI_MCASP
 	help
-	  Enable support for Bela audio hardware on TI AM62x
-	  platforms using McASP and external codecs.
-
-	  This driver creates a single ALSA sound card combining
-	  the TLV320AIC3106 (2ch stereo) and ES9080Q (8ch DAC)
-	  into a 10-output + 2-input TDM configuration.
+	  Support for the Bela Gem Multi audio cape on PocketBeagle2 (AM625).
+	  Provides a 10-output + 2-input TDM sound card using TLV320AIC3106
+	  (stereo) and ES9080Q (8-channel DAC) on a shared McASP2 bus.
 
 endmenu
 

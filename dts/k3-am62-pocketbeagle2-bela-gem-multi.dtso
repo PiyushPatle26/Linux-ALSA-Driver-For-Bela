@@ -6,19 +6,21 @@
  * (compatible "ti,am625-bela-gem-multi").
  *
  * Codecs on main_i2c1 (bus shows as /dev/i2c-2):
- *   TLV320AIC3106  @0x18  — stereo I/O, CLOCK MASTER (BCLK + WCLK)
+ *   TLV320AIC3106  @0x18  — stereo I/O, clock slave (BCLK/WCLK from McASP)
  *   ES9080Q        @0x48  — 8-channel DAC, clock slave (write-only @0x4c)
  *   TLV320ADC3140  @0x4e  — 4-channel ADC #1, clock slave (capture)
  *   TLV320ADC3140  @0x4f  — 4-channel ADC #2, clock slave (capture)
  *   (ADC addresses confirmed with `i2cdetect -y 2` at bring-up; adjust reg if needed.)
  *
- * Clock topology (same master as the validated Stereo board):
- *   audio_refclk1 (12.288 MHz) -> P2.11 MCLK -> TLV320AIC3106 MCLK_IN
- *   TLV320AIC3106 PLL -> P2.19 BCLK + P2.10 WCLK -> McASP2 (slave) + all other codecs
+ * Clock topology (McASP is BCLK+WCLK master; AIC3106 and all other codecs are
+ * clock slaves on the TDM bus):
+ *   audio_refclk1 (12.288 MHz) -> P2.11 MCLK -> codec MCLK inputs
+ *   mcasp2 fck (24.576 MHz, pinned via assigned-clock-rates) divided by 2 ->
+ *   P2.19 BCLK (12.288 MHz) + P2.10 WCLK (48 kHz) -> all codec BCLK/WCLK inputs
  *   Machine driver does clk_get(dev,"mclk") + clk_prepare_enable(), so the
  *   sound node carries clocks=<&audio_refclk1>, clock-names="mclk".
  *
- * Shared McASP2 frame: 16 slots x 32-bit, DSP_B (TDM). Each codec uses its OWN
+ * Shared McASP2 frame: 8 slots x 32-bit, DSP_B (TDM). Each codec uses its OWN
  * serializer (data pin) and emits/consumes its channels from slot 0 of that line:
  *   AXR0 (P2.05) TX -> TLV DIN   (playback, slots 0-1)
  *   AXR1 (P2.07) RX <- TLV DOUT  (capture,  slots 0-1)
@@ -32,7 +34,7 @@
  * Pin map (PocketBeagle2 header -> AM62 pad, verified vs PB2-BELA.dtso):
  *   P1.33 I2C1_SDA   P1.36 I2C1_SCL
  *   P2.05 AXR0  P2.07 AXR1  P1.04 AXR6  P1.02 AXR4  P2.31 AXR8
- *   P2.10 AFSX/WCLK(in)  P2.19 ACLKX/BCLK(in)  P2.11 AUDIO_EXT_REFCLK1/MCLK(out)
+ *   P2.10 AFSX/WCLK(out) P2.19 ACLKX/BCLK(out) P2.11 AUDIO_EXT_REFCLK1/MCLK(out)
  *   P2.18 GPIO0_53 -> ES9080 CHIP_EN / ADC_RST# (hogged active, needs JP8 bridged)
  */
 
@@ -110,8 +112,8 @@
 		pinctrl-single,pins = <
 			AM62X_IOPAD(0x01d8, PIN_OUTPUT, 8) /* (C15) MCASP2_AXR0, P2.05 TX -> TLV DIN (playback) */
 			AM62X_IOPAD(0x01dc, PIN_INPUT,  8) /* (E15) MCASP2_AXR1, P2.07 RX <- TLV DOUT (capture) */
-			AM62X_IOPAD(0x0174, PIN_INPUT,  2) /* (AD21) MCASP2_AFSX,  P2.10 WCLK (codec-driven) */
-			AM62X_IOPAD(0x0178, PIN_INPUT,  2) /* (AC20) MCASP2_ACLKX, P2.19 BCLK (codec-driven) */
+			AM62X_IOPAD(0x0174, PIN_OUTPUT, 2) /* (AD21) MCASP2_AFSX,  P2.10 WCLK (McASP-driven, frame master) */
+			AM62X_IOPAD(0x0178, PIN_OUTPUT, 2) /* (AC20) MCASP2_ACLKX, P2.19 BCLK (McASP-driven, bit-clock master) */
 			AM62X_IOPAD(0x016c, PIN_OUTPUT, 2) /* (Y18) MCASP2_AXR6,  P1.04 TX -> ES9080Q DIN1 (8ch) */
 			AM62X_IOPAD(0x0164, PIN_INPUT,  2) /* (AA19) MCASP2_AXR4, P1.02 RX <- ADC3140 #1 DOUT */
 			AM62X_IOPAD(0x0170, PIN_INPUT,  5) /* (AA18) MCASP2_AXR8, P2.31 RX <- ADC3140 #2 DOUT */
@@ -138,20 +140,27 @@
 	pinctrl-0 = <&bela_multi_mclk_pins>;
 };
 
-/* ES9080Q CHIP_EN / ADC_RST# hog (P2.18 / GPIO0_53, needs JP8 bridged) */
+/*
+ * GPIO0_53 (P2.18) is a SHARED codec control line:
+ *   - ES9080Q CHIP_EN       (active-high enable, via JP8)
+ *   - TLV320ADC3140 RESETN  (active-low reset, same physical net)
+ *
+ * It must be driven STATICALLY HIGH and held there. A static gpio-hog
+ * (ACTIVE_LOW + output-low => raw pad HIGH) enables the ES9080Q and
+ * simultaneously holds both ADC3140s out of reset. It must NOT be used as a
+ * pulsed reset-gpios: asserting it low to "reset" the ADCs also drops ES9080Q
+ * CHIP_EN, which then fails its I2C probe with -121 (EREMOTEIO). The ADCs do
+ * not need a reset pulse here -- their supplies are stable at boot, so a
+ * static raw-HIGH releases them cleanly.
+ */
 &main_gpio0 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&bela_multi_ctrl_pins>;
 
 	bela_codec_enable {
-		/*
-		 * ADC_RST# is active-low and tied to ES9080 CHIP_EN via JP8.
-		 * ACTIVE_LOW + output-low => gpiolib drives the raw pad HIGH,
-		 * releasing reset / enabling the codec control line at boot.
- */
 		gpio-hog;
 		gpios = <53 GPIO_ACTIVE_LOW>;
-		output-low;
+		output-low;	/* ACTIVE_LOW + output-low => raw pad HIGH */
 		line-name = "bela-codec-enable";
 	};
 };
@@ -191,8 +200,9 @@
 	 * clocked by the AIC3106 BCLK/WCLK. Each drives its own McASP RX
 	 * serializer (AXR4 / AXR8). avdd = 3.3V, iovdd = 3.3V (board rails).
 	 * The on-chip areg LDO supplies the 1.8V analog domain (no "areg" phandle).
-	 * Reset is shared with ES9080 CHIP_EN via the GPIO0_53 hog above, so no
-	 * per-device reset-gpios here.
+	 * RESETN shares GPIO0_53 with ES9080 CHIP_EN and is held HIGH by the
+	 * bela_codec_enable hog above. We deliberately do NOT use reset-gpios here:
+	 * a pulsed reset would also drop ES9080Q CHIP_EN and break its probe.
  */
 	adc3140_1: adc@4e {
 		compatible = "ti,tlv320adc3140";
@@ -218,10 +228,24 @@
 	pinctrl-0 = <&bela_multi_audio_pins>;
 	status = "okay";
 
-	/* No assigned-clocks: pure BCLK/WCLK slave (TLV is master). */
+	/*
+	 * McASP2 is the BCLK + WCLK (frame) master for the whole TDM bus; all
+	 * codecs are clock consumers. A stereo codec (TLV320AIC3106) cannot
+	 * master a frame wider than its 2 channels, so the McASP generates the
+	 * 8-slot frame instead. The functional clock is pinned to 24.576 MHz
+	 * below, and the machine driver passes the same rate via set_sysclk so
+	 * the McASP programs the BCLK divider: 24.576 MHz / 2 = 12.288 MHz
+	 * (= 256 * 48 kHz = 8 slots * 32 bits * 48 kHz). auxclk-fs-ratio is
+	 * also present for rate-constraint negotiation but is not sufficient
+	 * alone (does not program the BCLK divider hardware).
+	 */
+	assigned-clocks = <&k3_clks 192 0>;
+	assigned-clock-rates = <24576000>;
+
+	auxclk-fs-ratio = <256>;
 
 	op-mode   = <0>;     /* DAVINCI_MCASP_IIS_MODE */
-	tdm-slots = <16>;    /* machine driver re-programs slots/masks per link */
+	tdm-slots = <8>;     /* 8 x 32 = 256 BCLK/frame (= Bela kNumBits 256); machine driver re-programs masks per link */
 
 	/*
 	 * serial-dir convention: 0=inactive, 1=TX, 2=RX (AXR index = position).

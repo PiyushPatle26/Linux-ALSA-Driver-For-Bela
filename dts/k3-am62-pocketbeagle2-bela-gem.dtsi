@@ -15,11 +15,15 @@
  *
  * PocketBeagle2 expansion muxing maps these nets to:
  *   AUD_SDA/AUD_SCL -> main_i2c1
- *   AUD_DOUT        -> MCASP2_AXR0 (codec DOUT = SoC RX)
- *   AUD_DIN         -> MCASP2_AXR1 (codec DIN  = SoC TX)
+ *   AUD_DIN  (SoC->codec, playback) -> MCASP2_AXR0 (P2.5, SoC TX)
+ *   AUD_DOUT (codec->SoC, capture)  -> MCASP2_AXR1 (P2.7, SoC RX)
  *   AUD_WCLK        -> MCASP2_AFSX
  *   AUD_BCLK        -> MCASP2_ACLKX
  *   AUD_MCLK        -> AUDIO_EXT_REFCLK1 (&audio_refclk1 in k3-am62-main.dtsi)
+ *
+ * NOTE: AXR0=TX / AXR1=RX is the hardware ground truth, verified by oscilloscope
+ * under Bela's runtime (P2.05 carries playback TX, P2.07 carries capture RX) and
+ * by the hardware-validated Stereo overlay. serial-dir: 0=off, 1=TX, 2=RX.
  *
  * Clock topology (confirmed by giuliomoro/Bela):
  *   McASP2 outputs MCLK via AUDIO_EXT_REFCLK1 (12.288 MHz) -> TLV320AIC3106
@@ -105,33 +109,24 @@
 		};
 	};
 
+	/*
+	 * Full Bela Gem Multi card driven by the custom machine driver
+	 * (driver/sound/soc/ti/am625-bela-gem.c). Kept disabled here because the
+	 * active development path is the .dtso overlay; enable this (and disable
+	 * gem_simple_sound) to bake the Multi card into the base DT.
+	 */
 	bela_sound: sound-tdm {
-		compatible = "bela,audio-cape";
-		model = "PocketBeagle2 Bela Gem";
+		compatible = "ti,am625-bela-gem-multi";
+		model = "BelaGemMulti";
 
-		cpu-dai = <&mcasp2>;
-		/* Legacy binding name; actual hardware is TLV320AIC3106. */
-		aic3104-codec = <&tlv320aic3106>;
-		es9080q-codec = <&es9080q>;
+		cpu-dai        = <&mcasp2>;
+		aic3106-codec  = <&tlv320aic3106>;
+		es9080q-codec  = <&es9080q>;
+		adc3140-1-codec = <&adc3140_1>;
+		adc3140-2-codec = <&adc3140_2>;
 
 		clocks = <&audio_refclk1>;
 		clock-names = "mclk";
-
-		audio-routing =
-			"Headphone Jack",   "HPLOUT",
-			"Headphone Jack",   "HPROUT",
-			"AIC3104 Line Out", "LLOUT",
-			"AIC3104 Line Out", "RLOUT",
-			"LINE1L",           "Line In",
-			"LINE1R",           "Line In",
-			"DAC Out 1",        "OUT1",
-			"DAC Out 2",        "OUT2",
-			"DAC Out 3",        "OUT3",
-			"DAC Out 4",        "OUT4",
-			"DAC Out 5",        "OUT5",
-			"DAC Out 6",        "OUT6",
-			"DAC Out 7",        "OUT7",
-			"DAC Out 8",        "OUT8";
 
 		status = "disabled";
 	};
@@ -154,10 +149,13 @@
 		 * AM62 pins that are not wired on the Gem hardware.
 		 */
 		pinctrl-single,pins = <
-			AM62X_IOPAD(0x01d8, PIN_INPUT,  8) /* (C15) MCAN0_TX.MCASP2_AXR0,    P2.5  AUD_DOUT (codec->SoC, RX) */
-			AM62X_IOPAD(0x01dc, PIN_OUTPUT, 8) /* (E15) MCAN0_RX.MCASP2_AXR1,    P2.7  AUD_DIN  (SoC->codec, TX) */
+			AM62X_IOPAD(0x01d8, PIN_OUTPUT, 8) /* (C15) MCAN0_TX.MCASP2_AXR0,    P2.5  TX -> TLV DIN (playback) */
+			AM62X_IOPAD(0x01dc, PIN_INPUT,  8) /* (E15) MCAN0_RX.MCASP2_AXR1,    P2.7  RX <- TLV DOUT (capture) */
 			AM62X_IOPAD(0x0174, PIN_INPUT,  2) /* (AD21) RGMII2_TD2.MCASP2_AFSX,  P2.10 AUD_WCLK (codec-driven) */
 			AM62X_IOPAD(0x0178, PIN_INPUT,  2) /* (AC20) RGMII2_TD3.MCASP2_ACLKX, P2.19 AUD_BCLK (codec-driven) */
+			AM62X_IOPAD(0x016c, PIN_OUTPUT, 2) /* (Y18) RGMII2_TD0.MCASP2_AXR6,   P1.04 TX -> ES9080Q DIN1 (8ch) */
+			AM62X_IOPAD(0x0164, PIN_INPUT,  2) /* (AA19) RGMII2_TX_CTL.MCASP2_AXR4, P1.02 RX <- ADC3140 #1 DOUT */
+			AM62X_IOPAD(0x0170, PIN_INPUT,  5) /* (AA18) RGMII2_TD1.MCASP2_AXR8,  P2.31 RX <- ADC3140 #2 DOUT */
 		>;
 	};
 
@@ -254,6 +252,23 @@
 		clocks = <&audio_refclk1>;
 		clock-names = "mclk";
 	};
+
+	/* TLV320ADC3140 quad-channel capture ADCs (addresses confirmed by i2cdetect) */
+	adc3140_1: adc@4e {
+		compatible = "ti,tlv320adc3140";
+		reg = <0x4e>;
+		#sound-dai-cells = <0>;
+		avdd-supply  = <&bela_vdda_3v3>;
+		iovdd-supply = <&vdd_3v3>;
+	};
+
+	adc3140_2: adc@4f {
+		compatible = "ti,tlv320adc3140";
+		reg = <0x4f>;
+		#sound-dai-cells = <0>;
+		avdd-supply  = <&bela_vdda_3v3>;
+		iovdd-supply = <&vdd_3v3>;
+	};
 };
 
 &mcasp2 {
@@ -274,9 +289,9 @@
 	 */
 	tdm-slots = <16>;
 	serial-dir = <          /* 0: INACTIVE, 1: TX, 2: RX */
-		2 1 0 0             /* AXR0=RX (codec DOUT->SoC), AXR1=TX (SoC->codec DIN) */
-		0 0 0 0
-		0 0 0 0
+		1 2 0 0             /* AXR0=TX (SoC->TLV DIN), AXR1=RX (TLV DOUT->SoC) */
+		2 0 1 0             /* AXR4=RX (ADC3140 #1), AXR6=TX (ES9080Q DIN1) */
+		2 0 0 0             /* AXR8=RX (ADC3140 #2) */
 		0 0 0 0
 	>;
 	tx-num-evt = <32>;
