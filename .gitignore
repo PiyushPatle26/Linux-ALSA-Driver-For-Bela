@@ -44,3 +44,12 @@ modules.builtin*
 *~
 *.swp
 .DS_Store
+
+# kernelrelease recorded by build.sh, consumed by deploy.sh
+.kver
+
+# vendor datasheet, do not commit (copyright)
+ES9080.PDF
+
+# private mentor conversation — not for the public fork
+mentor_talk.txt

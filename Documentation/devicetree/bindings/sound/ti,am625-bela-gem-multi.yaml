@@ -11,28 +11,46 @@ maintainers:
 
 description: |
   The Bela Gem Multi is a multi-channel audio cape for PocketBeagle2
-  (AM625). It combines two codecs on a shared TDM bus driven by McASP2:
+  (AM625). Four codecs share a single McASP2 TDM bus:
 
-    TLV320AIC3106 - stereo codec, 2ch in + 2ch out, BCLK/WCLK master
-    ES9080Q       - 8-channel DAC, outputs only, BCLK/WCLK slave
+    TLV320AIC3106  - stereo codec, BCLK/WCLK master, 2ch capture
+    ES9080Q        - 8-channel DAC, TDM consumer
+    TLV320ADC3140  - 4-channel ADC #1, TDM consumer
+    TLV320ADC3140  - 4-channel ADC #2, TDM consumer
 
-  Total I/O: 10 outputs (2 AIC3106 + 8 ES9080Q) + 2 inputs (AIC3106).
+  The card exposes three DAI links:
+
+    link 0  McASP2 <-> { TLV320AIC3106, ES9080Q }   playback + capture
+    link 1  McASP2  <- TLV320ADC3140 #1             capture only
+    link 2  McASP2  <- TLV320ADC3140 #2             capture only
+
+  The TLV320AIC3106 and the ES9080Q share one link because the ES9080Q
+  register port only responds while a master clock is present, and that
+  clock is the TLV320AIC3106 PLL output on its GPIO1 (AUX_MCLK) pad, which
+  only runs while the TLV320AIC3106 itself is streaming.
 
   Clock topology:
-    McASP2 outputs MCLK (~24 MHz) to TLV320AIC3106 via AUDIO_EXT_REFCLK1.
-    TLV320AIC3106 PLL generates BCLK (256 clocks/frame) and WCLK (48 kHz)
-    which are fed back to McASP2 and ES9080Q. Both operate as clock slaves.
+    An SoC reference clock (AUDIO_EXT_REFCLK1, ~24 MHz) feeds the
+    TLV320AIC3106 MCLK input. The TLV320AIC3106 PLL then generates:
+      - BCLK and WCLK for the whole TDM bus (it is the clock provider;
+        McASP2 and all other codecs are consumers), and
+      - AUX_MCLK on its GPIO1 pad, the MCLK for the ES9080Q and both
+        TLV320ADC3140s.
+    Deriving BCLK and AUX_MCLK from the one PLL is required: the ES9080Q
+    needs an integer MCLK-to-BCLK ratio.
 
-  TDM slot allocation (16 slots x 32 bits):
-    Slots 0-1  : TLV320AIC3106 (stereo in/out)
-    Slots 2-9  : ES9080Q (8-channel output)
-    Slots 10-15: Unused
+  TDM frame: 8 slots x 32 bits (256 BCLK per frame). Each codec sits on
+  its own McASP serializer and uses the low slots of that data line:
+    TLV320AIC3106   slots 0-1
+    ES9080Q         slots 0-7
+    TLV320ADC3140   slots 0-3 (each)
 
 properties:
   compatible:
     const: ti,am625-bela-gem-multi
 
   model:
+    $ref: /schemas/types.yaml#/definitions/string
     description: User-visible sound card name.
 
   cpu-dai:
@@ -44,23 +62,30 @@ properties:
     $ref: /schemas/types.yaml#/definitions/phandle
     description:
       Phandle to the TLV320AIC3106 codec node. Acts as BCLK and WCLK
-      master for the shared TDM bus.
+      provider for the shared TDM bus and generates AUX_MCLK on GPIO1.
 
   es9080q-codec:
     $ref: /schemas/types.yaml#/definitions/phandle
     description:
-      Phandle to the ES9080Q DAC node. Operates as TDM slave.
+      Phandle to the ES9080Q DAC node. Operates as a TDM consumer.
 
-  audio-routing:
-    $ref: /schemas/types.yaml#/definitions/non-unique-string-array
+  adc3140-1-codec:
+    $ref: /schemas/types.yaml#/definitions/phandle
     description:
-      DAPM route pairs connecting board connectors to codec widget names.
+      Phandle to the first TLV320ADC3140 capture codec node. Operates as
+      a TDM consumer on its own McASP receive serializer.
+
+  adc3140-2-codec:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      Phandle to the second TLV320ADC3140 capture codec node. Operates as
+      a TDM consumer on its own McASP receive serializer.
 
   clocks:
     maxItems: 1
     description:
-      MCLK reference clock. On AM625 this is audio_refclk1 output from
-      the McASP2 assigned-clocks configuration (~24 MHz).
+      MCLK reference clock supplied to the TLV320AIC3106. On AM625 this is
+      the audio_refclk1 output (~24 MHz).
 
   clock-names:
     items:
@@ -71,10 +96,12 @@ required:
   - cpu-dai
   - aic3106-codec
   - es9080q-codec
+  - adc3140-1-codec
+  - adc3140-2-codec
   - clocks
   - clock-names
 
-unevaluatedProperties: false
+additionalProperties: false
 
 examples:
   - |
@@ -82,7 +109,7 @@ examples:
         #address-cells = <1>;
         #size-cells = <0>;
 
-        aic3106: codec@18 {
+        aic3106: audio-codec@18 {
             compatible = "ti,tlv320aic3106";
             reg = <0x18>;
             #sound-dai-cells = <0>;
@@ -94,30 +121,30 @@ examples:
             #sound-dai-cells = <0>;
             ess,write-only-addr = <0x4c>;
         };
+
+        adc3140_1: adc@4e {
+            compatible = "ti,tlv320adc3140";
+            reg = <0x4e>;
+            #sound-dai-cells = <0>;
+        };
+
+        adc3140_2: adc@4f {
+            compatible = "ti,tlv320adc3140";
+            reg = <0x4f>;
+            #sound-dai-cells = <0>;
+        };
     };
 
     sound {
         compatible = "ti,am625-bela-gem-multi";
-        model = "PocketBeagle2 Bela Gem Multi";
+        model = "BelaGemMulti";
 
         cpu-dai = <&mcasp2>;
         aic3106-codec = <&aic3106>;
         es9080q-codec = <&es9080q>;
+        adc3140-1-codec = <&adc3140_1>;
+        adc3140-2-codec = <&adc3140_2>;
 
         clocks = <&audio_refclk1>;
         clock-names = "mclk";
-
-        audio-routing =
-            "Headphone Jack", "HPLOUT",
-            "Headphone Jack", "HPROUT",
-            "LINE1L",         "Line In",
-            "LINE1R",         "Line In",
-            "DAC Out 1",      "OUT1",
-            "DAC Out 2",      "OUT2",
-            "DAC Out 3",      "OUT3",
-            "DAC Out 4",      "OUT4",
-            "DAC Out 5",      "OUT5",
-            "DAC Out 6",      "OUT6",
-            "DAC Out 7",      "OUT7",
-            "DAC Out 8",      "OUT8";
     };

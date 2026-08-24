@@ -33,12 +33,6 @@
 /dts-v1/;
 /plugin/;
 
-&{/chosen} {
-	overlays {
-		k3-am62-pocketbeagle2-bela-gem-stereo.kernel = __TIMESTAMP__;
-	};
-};
-
 &{/} {
 	bela_vdda_3v3: regulator-bela-vdda-3v3 {
 		compatible = "regulator-fixed";

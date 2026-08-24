@@ -10,7 +10,7 @@
  * "receive from data line 1". es9080q_hw_init() programs the same mapping.
  *
  * Hardware connections on Bela Gem Multi (PocketBeagle2):
- *   I2C:      main_i2c1 (bus 2 in Linux)
+ *   I2C:      main_i2c1 (Linux bus number varies by config -- check i2cdetect -l)
  *   TDM DATA: McASP2_AXR6 (P1.04) -> ES9080Q DATA line 1 (ch 1-8, slots 0-7)
  *   BCLK:     P2.19 (McASP2_ACLKX, sourced from TLV320AIC3106 PLL)
  *   WCLK:     P2.10 (McASP2_AFSX,  sourced from TLV320AIC3106)
@@ -115,22 +115,42 @@
 #define ES9080Q_REG_PLL_CONFIG		0xC1
 #define ES9080Q_REG_PLL_PARAMS		0xCA
 
-/* Register range limits */
-#define ES9080Q_MAX_REG			0xFF
+/* Register range limits (register map: 0x00-0xA4 R/W, 0xC0-0xCB write-only
+ * via the secondary address, 0xE0-0xFF read-only status)
+ */
+#define ES9080Q_RW_REG_MAX		0xA4
 #define ES9080Q_WO_REG_MIN		0xC0
 #define ES9080Q_WO_REG_MAX		0xCB
+#define ES9080Q_RO_REG_MIN		0xE0
+#define ES9080Q_MAX_REG			0xFF
 
 /* Bit definitions */
 #define ES9080Q_AMP_ON			0x02
-#define ES9080Q_AMP_OFF			0x00
 #define ES9080Q_ALL_CH_EN		0xFF
 #define ES9080Q_TDM_DECODER_EN		0x01
 #define ES9080Q_FORCE_PLL_LOCK		0x80
 #define ES9080Q_INPUT_SEL_TDM		(0 << 2)
+
+/* TDM CONFIG1 (0x4F): [7] TDM_RESYNC, [6:4] MASTER_WS_SCALE, [3:0] TDM_CH_NUM */
+#define ES9080Q_TDM_WS_SCALE_DIV2	BIT(4)
+#define ES9080Q_TDM_CH_NUM(slots)	((slots) - 1)
+
+/* TDM CONFIG2 (0x50): [7] TDM_LJ_MODE, [6] TDM_VALID_EDGE, [5:0] TDM_VALID_PULSE_LEN */
 #define ES9080Q_TDM_LJ_MODE		BIT(7)
-#define ES9080Q_TDM_VALID_PULSE_8	0x08
+#define ES9080Q_TDM_VALID_EDGE_NEG	(0 << 6)
+#define ES9080Q_TDM_VALID_PULSE_LEN_8	0x08
+
+/* TDM CONFIG3 (0x51): [7:6] TDM_BIT_WIDTH (0 = 32-bit slots) */
 #define ES9080Q_TDM_32BIT		(0 << 6)
+
 #define ES9080Q_FORCE_VOLUME		BIT(6)
+
+/*
+ * RESET & PLL REGISTER1 (0xC0, write-only port):
+ * [7] AO_SOFT_RESET, [6] PLL_SOFT_RESET, [1] CLKHV_PHASE_INV, [0] GPIO1_INPUT
+ */
+#define ES9080Q_SOFT_RESET		0xC0
+#define ES9080Q_GPIO1_IN_CLKHV_INV	0x03
 
 /* Private driver state */
 
@@ -148,21 +168,19 @@ struct es9080q_priv {
 
 static bool es9080q_readable_reg(struct device *dev, unsigned int reg)
 {
-	/* Write-only range 192-203 is not readable via primary address */
-	if (reg >= ES9080Q_WO_REG_MIN && reg <= ES9080Q_WO_REG_MAX)
-		return false;
-	return true;
+	return reg <= ES9080Q_RW_REG_MAX || reg >= ES9080Q_RO_REG_MIN;
 }
 
 static bool es9080q_writeable_reg(struct device *dev, unsigned int reg)
 {
-	/* Read-only range 224-255 */
-	if (reg >= 0xE0)
-		return false;
-	/* Write-only range is handled by the secondary regmap */
-	if (reg >= ES9080Q_WO_REG_MIN && reg <= ES9080Q_WO_REG_MAX)
-		return false;
-	return true;
+	/* The write-only range is handled by the secondary regmap */
+	return reg <= ES9080Q_RW_REG_MAX;
+}
+
+static bool es9080q_volatile_reg(struct device *dev, unsigned int reg)
+{
+	/* Read-only status registers must never be served from the cache */
+	return reg >= ES9080Q_RO_REG_MIN;
 }
 
 static const struct regmap_config es9080q_regmap_config = {
@@ -171,6 +189,7 @@ static const struct regmap_config es9080q_regmap_config = {
 	.max_register	= ES9080Q_MAX_REG,
 	.readable_reg	= es9080q_readable_reg,
 	.writeable_reg	= es9080q_writeable_reg,
+	.volatile_reg	= es9080q_volatile_reg,
 	/*
 	 * Use a flat cache so control reads (e.g. amixer enumerating the
 	 * volume controls) are served from the cache instead of hitting the
@@ -225,8 +244,12 @@ static int es9080q_hw_init(struct es9080q_priv *es)
 		usleep_range(10000, 15000);
 	}
 
-	/* PLL/GPIO registers via write-only address */
-	ret = es9080q_write(es, ES9080Q_REG_RESET_PLL1, 0x03);
+	/*
+	 * PLL/GPIO registers via write-only address. Set the GPIO1 (MCLK) pad
+	 * to input mode and invert the CLKHV phase for better DNR.
+	 */
+	ret = es9080q_write(es, ES9080Q_REG_RESET_PLL1,
+			    ES9080Q_GPIO1_IN_CLKHV_INV);
 	if (ret)
 		return ret;
 
@@ -247,7 +270,14 @@ static int es9080q_hw_init(struct es9080q_priv *es)
 	if (ret)
 		return ret;
 
-	ret = es9080q_write(es, ES9080Q_REG_DAC_CONFIG, 0x01);
+	/*
+	 * SELECT_IDAC_NUM = MCLK/fs/128 - 1. AUX_MCLK is the AIC3106 PLL output on
+	 * GPIO1. Bela's Es9080_Codec.cpp uses SELECT_IDAC_NUM = 3, i.e. MCLK =
+	 * 512*fs (GPIO1 = PLL/4, ~24.576 MHz @ 48 kHz). Since we program the
+	 * identical AIC3106 GPIO1 value (reg 98 = 0x50), match that with 0x03.
+	 * A wrong ratio here makes the DAC interpolator run at the wrong rate.
+	 */
+	ret = es9080q_write(es, ES9080Q_REG_DAC_CONFIG, 0x03);
 	if (ret)
 		return ret;
 
@@ -255,7 +285,11 @@ static int es9080q_hw_init(struct es9080q_priv *es)
 	if (ret)
 		return ret;
 
-	ret = es9080q_write(es, ES9080Q_REG_CP_CLK_DIV, 0x05);
+	/*
+	 * CP_CLK_DIV: charge-pump clock = SYS_CLK / ((x+1) * 2), valid 500k-1MHz.
+	 * For SYS_CLK = 512*fs (~22.6-24.6 MHz) use 0x0C -> ~870-945 kHz.
+	 */
+	ret = es9080q_write(es, ES9080Q_REG_CP_CLK_DIV, 0x0C);
 	if (ret)
 		return ret;
 
@@ -276,12 +310,26 @@ static int es9080q_hw_init(struct es9080q_priv *es)
 	if (ret)
 		return ret;
 
-	ret = es9080q_write(es, ES9080Q_REG_TDM_CONFIG1, 0x07);
+	/*
+	 * MASTER_WS_SCALE only affects master-mode clock generation but is
+	 * programmed for a 512*fs MCLK regardless, matching the reference
+	 * (MCLK/WS = 512 = menc_div(2) * 128 * 2^WS_SCALE -> WS_SCALE = 1).
+	 */
+	ret = es9080q_write(es, ES9080Q_REG_TDM_CONFIG1,
+			    ES9080Q_TDM_WS_SCALE_DIV2 | ES9080Q_TDM_CH_NUM(8));
 	if (ret)
 		return ret;
 
+	/*
+	 * Left-justified decode latched on the NEGATIVE WS valid edge. The
+	 * frame master emits a 1-BCLK-wide WS pulse, so the falling edge sits
+	 * one BCLK after frame start — the same position as the bus's DSP_A
+	 * (1-bit-delay) data. Omitting TDM_LJ_MODE misaligns the slot decode
+	 * and turns playback into broadband noise.
+	 */
 	ret = es9080q_write(es, ES9080Q_REG_TDM_CONFIG2,
-			    ES9080Q_TDM_LJ_MODE | ES9080Q_TDM_VALID_PULSE_8);
+			    ES9080Q_TDM_LJ_MODE | ES9080Q_TDM_VALID_EDGE_NEG |
+			    ES9080Q_TDM_VALID_PULSE_LEN_8);
 	if (ret)
 		return ret;
 
@@ -362,7 +410,7 @@ static int es9080q_hw_init(struct es9080q_priv *es)
 	/*
 	 * DAC clock resync — 3 sequential writes required to align
 	 * all clocks in the DAC core for best analog performance.
- */
+	 */
 	ret = es9080q_write(es, ES9080Q_REG_DAC_RESYNC, 0x10);
 	if (ret)
 		return ret;
@@ -378,13 +426,22 @@ static int es9080q_hw_init(struct es9080q_priv *es)
 	if (ret)
 		return ret;
 
-	/* Force immediate volume updates; set all channels to 0 dB */
+	/* Force immediate volume updates */
 	ret = es9080q_write(es, ES9080Q_REG_VOL_CTRL, ES9080Q_FORCE_VOLUME);
 	if (ret)
 		return ret;
 
+	/*
+	 * Restore the per-channel volumes from the register cache: the chip is
+	 * soft-reset on every stream stop, and user control writes issued
+	 * while it was in reset only reached the cache. An untouched cache
+	 * entry is 0 = 0 dB.
+	 */
 	for (i = 0; i < 8; i++) {
-		ret = es9080q_write(es, ES9080Q_REG_VOL_CH1 + i, 0x00);
+		unsigned int vol = 0;
+
+		regmap_read(es->regmap, ES9080Q_REG_VOL_CH1 + i, &vol);
+		ret = es9080q_write(es, ES9080Q_REG_VOL_CH1 + i, vol);
 		if (ret)
 			return ret;
 	}
@@ -416,27 +473,33 @@ static int es9080q_probe(struct snd_soc_component *component)
 
 /* DAI operations */
 
-static int es9080q_hw_params(struct snd_pcm_substream *substream,
-			     struct snd_pcm_hw_params *params,
-			     struct snd_soc_dai *dai)
+static int es9080q_ensure_init(struct snd_soc_dai *dai)
 {
 	struct es9080q_priv *es = snd_soc_component_get_drvdata(dai->component);
 	int ret;
 
-	dev_dbg(dai->dev, "hw_params: rate=%u channels=%u\n",
-		params_rate(params), params_channels(params));
-
 	/*
-	 * Run the one-time hardware init on the first stream rather than at
-	 * probe: the register port is only accessible once the master clock is
-	 * running, which requires the shared TDM frame to be active.
+	 * The AIC3106 GPIO1 clock output only starts when its DAPM stream is
+	 * powered. ASoC calls digital_mute(false) after that stream event, making
+	 * this the first point at which the ES9080Q register port is accessible.
 	 * es9080q_hw_init() issues the write-only PLL/reset writes first, which
 	 * also bring up the R/W port.
 	 */
 	if (!es->hw_inited) {
+		int attempt;
+
 		regcache_cache_only(es->regmap, false);
 
-		ret = es9080q_hw_init(es);
+		/*
+		 * Allow the AIC3106 PLL and its divided GPIO1 output a few
+		 * milliseconds to settle before giving up.
+		 */
+		for (attempt = 0; attempt < 10; attempt++) {
+			ret = es9080q_hw_init(es);
+			if (!ret)
+				break;
+			usleep_range(2000, 3000);
+		}
 		if (ret) {
 			/*
 			 * Return to cache-only so later control accesses do not
@@ -459,14 +522,35 @@ static int es9080q_hw_params(struct snd_pcm_substream *substream,
 static int es9080q_set_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 {
 	/*
-	 * ES9080Q on Bela Gem Multi is always TDM slave, clocked by
-	 * TLV320AIC3106. Only DSP_B (TDM with 1-bit offset) is used.
- */
+	 * The chip is programmed for one fixed framing (es9080q_hw_init()):
+	 * left-justified decode on the negative WS valid edge. Against a frame
+	 * master emitting a 1-BCLK WS pulse this equals DSP_A (1-bit delay)
+	 * with a rising-edge pulse and non-inverted BCLK — DSP_A + IB_NF in
+	 * davinci-mcasp terms, whose IB_NF clears the ACLK polarity inversion.
+	 * Reject anything else rather than play misaligned audio.
+	 */
 	switch (fmt & SND_SOC_DAIFMT_FORMAT_MASK) {
-	case SND_SOC_DAIFMT_DSP_B:
+	case SND_SOC_DAIFMT_DSP_A:
 		break;
 	default:
 		dev_err(dai->dev, "unsupported DAI format 0x%x\n", fmt);
+		return -EINVAL;
+	}
+
+	switch (fmt & SND_SOC_DAIFMT_INV_MASK) {
+	case SND_SOC_DAIFMT_IB_NF:
+		break;
+	default:
+		dev_err(dai->dev, "unsupported clock inversion 0x%x\n", fmt);
+		return -EINVAL;
+	}
+
+	/* No master-mode support: BCLK and WCLK must be supplied to the chip */
+	switch (fmt & SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) {
+	case SND_SOC_DAIFMT_CBC_CFC:
+		break;
+	default:
+		dev_err(dai->dev, "unsupported clock provider 0x%x\n", fmt);
 		return -EINVAL;
 	}
 
@@ -479,18 +563,73 @@ static int es9080q_set_sysclk(struct snd_soc_dai *dai, int clk_id,
 	return 0;
 }
 
+static int es9080q_set_tdm_slot(struct snd_soc_dai *dai, unsigned int tx_mask,
+				unsigned int rx_mask, int slots, int slot_width)
+{
+	/*
+	 * The chip decodes a fixed frame: 8 slots x 32 bits on DATA line 1,
+	 * channel N from slot N (programmed in es9080q_hw_init()). Accept only
+	 * that layout; the tx_mask may be a subset when fewer outputs are fed.
+	 */
+	if (slots != 8 || slot_width != 32) {
+		dev_err(dai->dev, "unsupported TDM geometry %dx%d (need 8x32)\n",
+			slots, slot_width);
+		return -EINVAL;
+	}
+
+	if (!tx_mask || tx_mask & ~0xffU || rx_mask) {
+		dev_err(dai->dev, "unsupported TDM masks tx 0x%x rx 0x%x\n",
+			tx_mask, rx_mask);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
 static int es9080q_mute_stream(struct snd_soc_dai *dai, int mute, int direction)
 {
 	struct es9080q_priv *es = snd_soc_component_get_drvdata(dai->component);
+	int ret;
 
-	return regmap_write(es->regmap, ES9080Q_REG_AMP_CTRL,
-			    mute ? ES9080Q_AMP_OFF : ES9080Q_AMP_ON);
+	if (mute) {
+		if (!es->hw_inited)
+			return 0;
+
+		/*
+		 * Stream stop. The R/W register port may already be dead here:
+		 * it needs a running MCLK, and AUX_MCLK stops with the AIC3106
+		 * stream. Soft-reset the chip through the WRITE-ONLY port
+		 * instead, which works without MCLK (this is also what Bela's
+		 * reference driver does on stop). The next stream start runs
+		 * the full init again; meanwhile serve controls from the
+		 * cache so user writes cannot NAK on the shared bus.
+		 */
+		ret = es9080q_write(es, ES9080Q_REG_RESET_PLL1,
+				    ES9080Q_SOFT_RESET);
+		if (!ret)
+			ret = es9080q_write(es, ES9080Q_REG_RESET_PLL1, 0x00);
+
+		regcache_cache_only(es->regmap, true);
+		es->hw_inited = false;
+		return ret;
+	}
+
+	ret = es9080q_ensure_init(dai);
+	if (ret)
+		return ret;
+
+	/*
+	 * The full 8-slot frame is always driven (the DAI's TDM mask fixes the
+	 * codec up to 8 channels whatever the stream width), so all channels
+	 * stay enabled; only the amp state machine is gated per stream.
+	 */
+	return regmap_write(es->regmap, ES9080Q_REG_AMP_CTRL, ES9080Q_AMP_ON);
 }
 
 static const struct snd_soc_dai_ops es9080q_dai_ops = {
-	.hw_params	 = es9080q_hw_params,
 	.set_fmt	 = es9080q_set_fmt,
 	.set_sysclk	 = es9080q_set_sysclk,
+	.set_tdm_slot	 = es9080q_set_tdm_slot,
 	.mute_stream	 = es9080q_mute_stream,
 	.no_capture_mute = 1,
 };
@@ -503,8 +642,13 @@ static struct snd_soc_dai_driver es9080q_dai = {
 		.stream_name  = "ES9080Q Playback",
 		.channels_min = 1,
 		.channels_max = 8,
-		.rates        = SNDRV_PCM_RATE_44100 | SNDRV_PCM_RATE_48000 |
-				SNDRV_PCM_RATE_96000  | SNDRV_PCM_RATE_192000,
+		/*
+		 * The init sequence hardcodes the 512*fs MCLK ratio
+		 * (SELECT_IDAC_NUM) that the Bela Gem clock tree provides at
+		 * these rates. Higher rates need a rate-dependent IDAC divider
+		 * and a faster MCLK; do not advertise them until implemented.
+		 */
+		.rates        = SNDRV_PCM_RATE_44100 | SNDRV_PCM_RATE_48000,
 		.formats      = SNDRV_PCM_FMTBIT_S32_LE,
 	},
 	.ops = &es9080q_dai_ops,
@@ -519,14 +663,36 @@ static struct snd_soc_dai_driver es9080q_dai = {
 static const DECLARE_TLV_DB_SCALE(es9080q_vol_tlv, -12750, 50, 0);
 
 static const struct snd_kcontrol_new es9080q_controls[] = {
-	SOC_SINGLE_TLV("Ch1 Volume", ES9080Q_REG_VOL_CH1, 0, 255, 1, es9080q_vol_tlv),
-	SOC_SINGLE_TLV("Ch2 Volume", ES9080Q_REG_VOL_CH2, 0, 255, 1, es9080q_vol_tlv),
-	SOC_SINGLE_TLV("Ch3 Volume", ES9080Q_REG_VOL_CH3, 0, 255, 1, es9080q_vol_tlv),
-	SOC_SINGLE_TLV("Ch4 Volume", ES9080Q_REG_VOL_CH4, 0, 255, 1, es9080q_vol_tlv),
-	SOC_SINGLE_TLV("Ch5 Volume", ES9080Q_REG_VOL_CH5, 0, 255, 1, es9080q_vol_tlv),
-	SOC_SINGLE_TLV("Ch6 Volume", ES9080Q_REG_VOL_CH6, 0, 255, 1, es9080q_vol_tlv),
-	SOC_SINGLE_TLV("Ch7 Volume", ES9080Q_REG_VOL_CH7, 0, 255, 1, es9080q_vol_tlv),
-	SOC_SINGLE_TLV("Ch8 Volume", ES9080Q_REG_VOL_CH8, 0, 255, 1, es9080q_vol_tlv),
+	SOC_SINGLE_TLV("Ch1 Playback Volume", ES9080Q_REG_VOL_CH1, 0, 255, 1, es9080q_vol_tlv),
+	SOC_SINGLE_TLV("Ch2 Playback Volume", ES9080Q_REG_VOL_CH2, 0, 255, 1, es9080q_vol_tlv),
+	SOC_SINGLE_TLV("Ch3 Playback Volume", ES9080Q_REG_VOL_CH3, 0, 255, 1, es9080q_vol_tlv),
+	SOC_SINGLE_TLV("Ch4 Playback Volume", ES9080Q_REG_VOL_CH4, 0, 255, 1, es9080q_vol_tlv),
+	SOC_SINGLE_TLV("Ch5 Playback Volume", ES9080Q_REG_VOL_CH5, 0, 255, 1, es9080q_vol_tlv),
+	SOC_SINGLE_TLV("Ch6 Playback Volume", ES9080Q_REG_VOL_CH6, 0, 255, 1, es9080q_vol_tlv),
+	SOC_SINGLE_TLV("Ch7 Playback Volume", ES9080Q_REG_VOL_CH7, 0, 255, 1, es9080q_vol_tlv),
+	SOC_SINGLE_TLV("Ch8 Playback Volume", ES9080Q_REG_VOL_CH8, 0, 255, 1, es9080q_vol_tlv),
+
+	/*
+	 * Master switch = the AMP power-up state machine (AMP_CTRL bit 1), the
+	 * same bit mute_stream() drives. Starting or stopping a stream therefore
+	 * overrides whatever the user last set here.
+	 */
+	SOC_SINGLE("Master Playback Switch", ES9080Q_REG_AMP_CTRL, 1, 1, 0),
+
+	/*
+	 * Per-channel analog-section enables (ANALOG_EN bits 0-7). mute_stream()
+	 * rewrites this register on unmute to enable exactly the channels the TDM
+	 * frame carries, so per-channel switches set here do not survive a stream
+	 * start.
+	 */
+	SOC_SINGLE("Ch1 Playback Switch", ES9080Q_REG_ANALOG_EN, 0, 1, 0),
+	SOC_SINGLE("Ch2 Playback Switch", ES9080Q_REG_ANALOG_EN, 1, 1, 0),
+	SOC_SINGLE("Ch3 Playback Switch", ES9080Q_REG_ANALOG_EN, 2, 1, 0),
+	SOC_SINGLE("Ch4 Playback Switch", ES9080Q_REG_ANALOG_EN, 3, 1, 0),
+	SOC_SINGLE("Ch5 Playback Switch", ES9080Q_REG_ANALOG_EN, 4, 1, 0),
+	SOC_SINGLE("Ch6 Playback Switch", ES9080Q_REG_ANALOG_EN, 5, 1, 0),
+	SOC_SINGLE("Ch7 Playback Switch", ES9080Q_REG_ANALOG_EN, 6, 1, 0),
+	SOC_SINGLE("Ch8 Playback Switch", ES9080Q_REG_ANALOG_EN, 7, 1, 0),
 };
 
 static const struct snd_soc_dapm_widget es9080q_dapm_widgets[] = {
@@ -608,7 +774,7 @@ static int es9080q_i2c_probe(struct i2c_client *i2c)
 	/*
 	 * Set up the write-only I2C client for PLL/reset registers.
 	 * "ess,write-only-addr" specifies the secondary address (primary + 4).
- */
+	 */
 	if (!of_property_read_u32(i2c->dev.of_node, "ess,write-only-addr",
 				  &wo_addr)) {
 		es->i2c_wo = devm_i2c_new_dummy_device(&i2c->dev,
@@ -638,7 +804,7 @@ static int es9080q_i2c_probe(struct i2c_client *i2c)
 	/*
 	 * Optional CHIP_EN / reset GPIO. If not wired, driver proceeds
 	 * without hardware reset.
- */
+	 */
 	es->reset_gpio = devm_gpiod_get_optional(&i2c->dev, "reset",
 						 GPIOD_OUT_HIGH);
 	if (IS_ERR(es->reset_gpio))

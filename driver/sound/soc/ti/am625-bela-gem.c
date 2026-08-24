@@ -2,21 +2,31 @@
 /*
  * Bela Gem Multi Audio Cape — ASoC machine driver for AM625
  *
- * Four DAI links on a shared McASP2 TDM bus (8 slots x 32 bits, DSP_B).
- * McASP2 is the BCLK + WCLK (frame) master for the whole frame; every codec is
- * a clock consumer. (A stereo codec like the AIC3106 cannot master a frame
- * wider than its 2 channels, so the McASP clocks the 8-slot frame instead.)
- * Codecs still take their MCLK from audio_refclk1. Each codec uses its own
- * McASP serializer (data pin), starting at slot 0 of its own line:
+ * Three DAI links on a shared McASP2 TDM bus (8 slots x 32 bits, DSP_A = 1-bit data delay).
+ * The AIC3106 is the BCLK + WCLK (frame) master; its PLL generates BCLK/WCLK and
+ * AUX_MCLK (GPIO1) so the ES9080Q sees an integer MCLK:BCLK ratio. The McASP2 and
+ * the ES9080Q/ADC3140s are clock consumers.
  *
- *   Link 0: McASP2 <-> TLV320AIC3106  (stereo playback + capture, clock slave)
- *           AXR0 TX (slots 0-1), AXR1 RX (slots 0-1)
- *   Link 1: McASP2  -> ES9080Q        (8-ch playback, slave)
- *           AXR6 TX (slots 0-7)
- *   Link 2: McASP2  <- TLV320ADC3140 #1 (4-ch capture, slave)
- *           AXR4 RX (slots 0-3)
- *   Link 3: McASP2  <- TLV320ADC3140 #2 (4-ch capture, slave)
- *           AXR8 RX (slots 0-3)
+ *   Link 0: McASP2 <-> { AIC3106 (stereo P+C), ES9080Q (8-ch playback) }
+ *           AIC3106 AXR0 TX / AXR1 RX (slots 0-1); ES9080Q AXR6 TX (slots 0-7).
+ *           Both codecs share one stream so the AIC3106 PLL (hence AUX_MCLK) is
+ *           running before the ES9080Q register init runs in the same path.
+ *   Link 1: McASP2  <- TLV320ADC3140 #1 (4-ch capture)  AXR4 RX (slots 0-3)
+ *   Link 2: McASP2  <- TLV320ADC3140 #2 (4-ch capture)  AXR8 RX (slots 0-3)
+ *
+ * Playback channel map: davinci-mcasp interleaves a multi-serializer stream
+ * round-robin, channel n -> serializer (n % active), slot (n / active). With
+ * both TX serializers active (16-ch stream = 2 serializers x 8 slots):
+ *
+ *   even channels -> AXR0 (AIC3106):  ch0 = Line/HP L, ch2 = Line/HP R,
+ *                                     ch4..ch14 land in slots 2-7 (unused)
+ *   odd  channels -> AXR6 (ES9080Q):  ch1 = OUT1, ch3 = OUT2, ... ch15 = OUT8
+ *
+ * A 1/2-channel stream activates only AXR0 and plays through the AIC3106
+ * alone. Counts of 3-8 would also fit one serializer -- all on AXR0, never
+ * reaching the DAC -- so the startup hook constrains playback to {1, 2, 16}.
+ * This mirrors Bela's shipping configuration (outSerializers axr0 mask 0x3 +
+ * axr6 mask 0xff, 16 output channels).
  *
  * Authors: Piyush Patle <piyushpatle1228@gmail.com>
  *          Giulio Moro <giuliomoro@gmail.com>
@@ -46,34 +56,45 @@
 #define BELA_MCLK_DEFAULT	12288000U
 
 /*
- * McASP AUXCLK (high-frequency clock / AHCLKX source) rate used when the McASP
- * is the bit-clock master. The McASP divides this down to BCLK:
- *   24.576 MHz / 2 = 12.288 MHz = 256 * 48 kHz = 8 slots * 32 bits * 48 kHz.
- * The mcasp2 fck is pinned to this rate in the overlay (assigned-clock-rates),
- * and the same value is handed to the McASP via set_sysclk so it can program
- * the BCLK divider — without that, sysclk_freq stays 0 and the McASP never
- * generates a bit clock (silent DMA -EIO).
+ * TLV320AIC3106 GPIO1 control register (page 0, register 98). Writing
+ * BELA_AIC3X_GPIO1_PLL_CLKOUT routes the codec's PLL clock to the GPIO1 pad.
+ * On Bela Gem Multi that pad (PLL_AUXOUT) is the ONLY MCLK source for the
+ * ES9080Q and the two ADC3140s -- their register ports stay inaccessible until
+ * it runs. Value matches Bela's userspace driver (I2c_Codec.cpp: reg 98 = 0x50,
+ * "GPIO1: clock mux output (PLL) divided"). The AIC3106 PLL must be active for
+ * this to produce a clock, which is why the AIC3106 has to keep clocking.
  */
-#define BELA_MCASP_AUXCLK	24576000U
+#define BELA_AIC3X_GPIO1_REG		98
+#define BELA_AIC3X_GPIO1_PLL_CLKOUT	0x50
 
 /*
- * Tell the McASP its AHCLKX rate as bit-clock master: clk_id 0 + CLOCK_OUT
- * selects AUXCLK (the internal functional clock) as HCLK and stores
- * sysclk_freq, which davinci-mcasp needs to compute the BCLK divider.
+ * TLV320AIC3106 audio-serial control register B (page 0, register 9), bit 3:
+ * "256-clock mode". When the AIC3106 is the BCLK master this makes it emit a
+ * 256-BCLK frame (8 slots x 32 bit) instead of its native ~32/64-clock stereo
+ * frame. Matches Bela's I2c_Codec.cpp. The AIC3106 must master BCLK/WCLK so
+ * that they and AUX_MCLK all derive from the same AIC3106 PLL -- the ES9080Q
+ * requires an integer MCLK:BCLK ratio, which only holds when both come from one
+ * clock source.
  */
-static int bela_gem_set_mcasp_master_clk(struct snd_soc_dai *cpu)
-{
-	return snd_soc_dai_set_sysclk(cpu, 0, BELA_MCASP_AUXCLK,
-				      SND_SOC_CLOCK_OUT);
-}
+#define BELA_AIC3X_INTF_CTRLB_REG	9
+#define BELA_AIC3X_256_CLOCK_MODE	0x08
 
+/*
+ * Link 0 carries TWO codecs (AIC3106 + ES9080Q) so a single playback stream
+ * brings both up together. This is required for the ES9080Q: its register port
+ * only responds while a master clock (AUX_MCLK) is present, and AUX_MCLK is the
+ * AIC3106's PLL clock output (GPIO1) which only runs while the AIC3106 is
+ * streaming. The McASP is a single instance, so the AIC3106 and ES9080Q cannot
+ * stream on separate links at the same time -- putting them on one link makes
+ * opening it spin up the AIC3106 PLL (hence AUX_MCLK) before the ES9080Q init
+ * runs in the same hw_params().
+ */
 struct bela_gem_priv {
 	struct snd_soc_card		 card;
-	struct snd_soc_dai_link		 dai_links[4];
-	struct snd_soc_dai_link_component cpu[4];
-	struct snd_soc_dai_link_component platform[4];
-	struct snd_soc_dai_link_component aic_codec;
-	struct snd_soc_dai_link_component dac_codec;
+	struct snd_soc_dai_link		 dai_links[3];
+	struct snd_soc_dai_link_component cpu[3];
+	struct snd_soc_dai_link_component platform[3];
+	struct snd_soc_dai_link_component play_codecs[2];	/* AIC3106, ES9080Q */
 	struct snd_soc_dai_link_component adc1_codec;
 	struct snd_soc_dai_link_component adc2_codec;
 	struct snd_soc_codec_conf	 codec_conf[2];
@@ -131,67 +152,138 @@ static const struct snd_kcontrol_new bela_gem_controls[] = {
 	SOC_DAPM_PIN_SWITCH("DAC Out 8"),
 };
 
-/* Link 0 init: McASP2 + AIC3106 — McASP masters BCLK/WCLK, AIC takes MCLK */
-static int bela_gem_aic_init(struct snd_soc_pcm_runtime *rtd)
+/*
+ * Link 0 init: McASP2 + { AIC3106, ES9080Q }. The AIC3106 is the BCLK/WCLK
+ * master: its PLL generates BCLK/WCLK *and* AUX_MCLK (on GPIO1), so the ES9080Q
+ * sees an integer MCLK:BCLK ratio from one source. The McASP is a clock
+ * consumer; the ES9080Q is a pure TDM/clock consumer that inits in hw_params.
+ */
+static int bela_gem_play_init(struct snd_soc_pcm_runtime *rtd)
 {
 	struct bela_gem_priv *priv = snd_soc_card_get_drvdata(rtd->card);
-	struct snd_soc_dai *cpu = snd_soc_rtd_to_cpu(rtd, 0);
-	struct snd_soc_dai *aic = snd_soc_rtd_to_codec(rtd, 0);
+	struct snd_soc_dai *aic = snd_soc_rtd_to_codec(rtd, 0);	/* codec 0 */
+	struct snd_soc_dai *dac = snd_soc_rtd_to_codec(rtd, 1);	/* codec 1 */
 	int ret;
-
-	ret = bela_gem_set_mcasp_master_clk(cpu);
-	if (ret)
-		return ret;
-
-	ret = snd_soc_dai_set_tdm_slot(cpu, BELA_AIC_MASK, BELA_AIC_MASK,
-				       BELA_TDM_SLOTS, BELA_TDM_SLOT_WIDTH);
-	if (ret)
-		return ret;
 
 	ret = snd_soc_dai_set_sysclk(aic, 0, priv->mclk_freq, SND_SOC_CLOCK_IN);
 	if (ret)
 		return ret;
 
-	return snd_soc_dai_set_tdm_slot(aic, BELA_AIC_MASK, BELA_AIC_MASK,
-					BELA_TDM_SLOTS, BELA_TDM_SLOT_WIDTH);
-}
-
-/* Link 1 init: McASP2 + ES9080Q (playback, clock slave) */
-static int bela_gem_dac_init(struct snd_soc_pcm_runtime *rtd)
-{
-	struct bela_gem_priv *priv = snd_soc_card_get_drvdata(rtd->card);
-	struct snd_soc_dai *cpu = snd_soc_rtd_to_cpu(rtd, 0);
-	struct snd_soc_dai *dac = snd_soc_rtd_to_codec(rtd, 0);
-	int ret;
-
-	ret = bela_gem_set_mcasp_master_clk(cpu);
-	if (ret)
-		return ret;
-
-	ret = snd_soc_dai_set_tdm_slot(cpu, BELA_DAC_MASK, 0,
+	/*
+	 * Codec-side TDM masks are per DAI and stable, so they are set once
+	 * here. The McASP's masks are NOT set here: davinci-mcasp keeps one
+	 * global tx/rx mask pair for all three links, so the CPU masks are
+	 * programmed from each link's hw_params instead (which runs before the
+	 * CPU DAI's own hw_params), keeping whichever stream is being
+	 * configured authoritative.
+	 */
+	ret = snd_soc_dai_set_tdm_slot(aic, BELA_AIC_MASK, BELA_AIC_MASK,
 				       BELA_TDM_SLOTS, BELA_TDM_SLOT_WIDTH);
 	if (ret)
 		return ret;
 
-	ret = snd_soc_dai_set_sysclk(dac, 0, priv->mclk_freq, SND_SOC_CLOCK_IN);
-	if (ret && ret != -ENOTSUPP)
-		return ret;
-
+	/*
+	 * The stored tx_mask also makes ASoC fix up the ES9080Q's hw_params
+	 * to its 8 slots instead of the full interleaved stream width.
+	 */
 	return snd_soc_dai_set_tdm_slot(dac, BELA_DAC_MASK, 0,
 					BELA_TDM_SLOTS, BELA_TDM_SLOT_WIDTH);
 }
 
-/* Link 2/3 init: McASP2 + TLV320ADC3140 (capture, clock slave) */
-static int bela_gem_adc_init(struct snd_soc_pcm_runtime *rtd)
+/*
+ * Valid playback channel counts. davinci-mcasp activates TX serializers in
+ * index order, DIV_ROUND_UP(channels, slots) at a time: 1-2 channels use AXR0
+ * alone (AIC3106 stereo), 16 use AXR0 + AXR6 and reach all ten outputs.
+ * Intermediate counts (3-8) would also fit a single serializer, putting every
+ * channel on AXR0 where only slots 0-1 are consumed -- silently discarding
+ * most of the stream -- so they are excluded.
+ */
+static const unsigned int bela_gem_play_channels[] = { 1, 2, 16 };
+
+static const struct snd_pcm_hw_constraint_list bela_gem_play_constraints = {
+	.list	= bela_gem_play_channels,
+	.count	= ARRAY_SIZE(bela_gem_play_channels),
+};
+
+static int bela_gem_play_startup(struct snd_pcm_substream *substream)
 {
+	/*
+	 * Capture on this link is the AIC3106's two channels on AXR1 only.
+	 * Without a constraint the multi-codec CPU-range bypass in
+	 * snd_soc_runtime_calc_hw() would advertise up to 24 channels (3 RX
+	 * serializers x 8 slots), and a >2-channel capture would silently
+	 * activate the ADC3140s' serializers and interleave their data in.
+	 */
+	if (substream->stream == SNDRV_PCM_STREAM_CAPTURE)
+		return snd_pcm_hw_constraint_minmax(substream->runtime,
+						    SNDRV_PCM_HW_PARAM_CHANNELS,
+						    1, 2);
+
+	return snd_pcm_hw_constraint_list(substream->runtime, 0,
+					  SNDRV_PCM_HW_PARAM_CHANNELS,
+					  &bela_gem_play_constraints);
+}
+
+/*
+ * davinci-mcasp stores a single global TDM mask pair, shared by all three
+ * links. Program the McASP masks from link hw_params — it runs before the CPU
+ * DAI's own hw_params, so the masks in force always belong to the stream
+ * being configured, whichever link last touched them.
+ */
+static int bela_gem_play_hw_params(struct snd_pcm_substream *substream,
+				   struct snd_pcm_hw_params *params)
+{
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct snd_soc_dai *cpu = snd_soc_rtd_to_cpu(rtd, 0);
-	struct snd_soc_dai *adc = snd_soc_rtd_to_codec(rtd, 0);
+
+	/*
+	 * TX spans the full 8-slot frame on every active serializer; RX is
+	 * the AIC3106 stereo capture (slots 0-1 on AXR1).
+	 */
+	return snd_soc_dai_set_tdm_slot(cpu, BELA_DAC_MASK, BELA_AIC_MASK,
+					BELA_TDM_SLOTS, BELA_TDM_SLOT_WIDTH);
+}
+
+/*
+ * Re-route the AIC3106 PLL clock to its GPIO1 pad (= AUX_MCLK for the ES9080Q
+ * and ADC3140s) after hw_params has finished. The aic3x "GPIO1 dmic modclk"
+ * DAPM widget also owns GPIO1[7:4], and snd_soc_dapm_update_dai() can restore
+ * those bits to "disabled" after a link hw_params write. Link prepare runs
+ * after all codec hw_params/DAPM updates and before the ES9080Q DAI prepare,
+ * so the clock output is stable before the ES9080Q register port is accessed.
+ */
+static int bela_gem_play_prepare(struct snd_pcm_substream *substream)
+{
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct snd_soc_dai *aic = snd_soc_rtd_to_codec(rtd, 0);
 	int ret;
 
-	ret = snd_soc_dai_set_tdm_slot(cpu, 0, BELA_ADC_MASK,
-				       BELA_TDM_SLOTS, BELA_TDM_SLOT_WIDTH);
-	if (ret)
+	/*
+	 * Put the AIC3106 in 256-clock mode so, as BCLK master, it emits the
+	 * 256-BCLK/8-slot frame the ES9080Q and ADC3140s expect. aic3x clears
+	 * this field in hw_params, so set it here (prepare runs afterwards).
+	 */
+	ret = snd_soc_component_update_bits(aic->component,
+					    BELA_AIC3X_INTF_CTRLB_REG,
+					    BELA_AIC3X_256_CLOCK_MODE,
+					    BELA_AIC3X_256_CLOCK_MODE);
+	if (ret < 0)
 		return ret;
+
+	return snd_soc_component_write(aic->component, BELA_AIC3X_GPIO1_REG,
+				      BELA_AIC3X_GPIO1_PLL_CLKOUT);
+}
+
+static const struct snd_soc_ops bela_gem_play_ops = {
+	.startup   = bela_gem_play_startup,
+	.hw_params = bela_gem_play_hw_params,
+	.prepare   = bela_gem_play_prepare,
+};
+
+/* Link 1/2 init: McASP2 + TLV320ADC3140 (capture, clock consumer) */
+static int bela_gem_adc_init(struct snd_soc_pcm_runtime *rtd)
+{
+	struct snd_soc_dai *adc = snd_soc_rtd_to_codec(rtd, 0);
 
 	/*
 	 * The ADC3140 is capture-only: on the TDM bus the codec TRANSMITS its
@@ -205,22 +297,51 @@ static int bela_gem_adc_init(struct snd_soc_pcm_runtime *rtd)
 					BELA_TDM_SLOTS, BELA_TDM_SLOT_WIDTH);
 }
 
+static int bela_gem_adc_startup(struct snd_pcm_substream *substream)
+{
+	/* Each ADC3140 contributes four channels on its own serializer. */
+	return snd_pcm_hw_constraint_minmax(substream->runtime,
+					    SNDRV_PCM_HW_PARAM_CHANNELS, 1, 4);
+}
+
+/* See bela_gem_play_hw_params() for why the CPU masks are set here. */
+static int bela_gem_adc_hw_params(struct snd_pcm_substream *substream,
+				  struct snd_pcm_hw_params *params)
+{
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct snd_soc_dai *cpu = snd_soc_rtd_to_cpu(rtd, 0);
+
+	return snd_soc_dai_set_tdm_slot(cpu, 0, BELA_ADC_MASK,
+					BELA_TDM_SLOTS, BELA_TDM_SLOT_WIDTH);
+}
+
+static const struct snd_soc_ops bela_gem_adc_ops = {
+	.startup   = bela_gem_adc_startup,
+	.hw_params = bela_gem_adc_hw_params,
+};
+
 static int bela_gem_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct device_node *np = dev->of_node;
 	struct device_node *cpu_node, *aic_node, *dac_node, *adc1_node, *adc2_node;
 	/*
-	 * The McASP is the BCLK/WCLK + frame master for the whole 8-slot TDM
-	 * frame; every codec is a clock consumer (CBC_CFC). The TLV320AIC3106
-	 * cannot master a frame wider than its own 2 channels (mainline
-	 * tlv320aic3x has no TDM-master frame-size control), so a stereo codec
-	 * cannot clock the shared 8-slot frame the ES9080Q needs. The McASP
-	 * generates a clean 256-BCLK/frame instead. Codecs still get their
-	 * MCLK from audio_refclk1 (P2.11); only BCLK/WCLK move to the McASP.
+	 * DSP_A (1-bit delay) + IB_NF is the framing validated on hardware and
+	 * matches Bela's shipping McASP registers (XDATDLY=1, all polarity
+	 * inversions clear -- davinci-mcasp's IB_NF clears ACLK[XR]POL). The
+	 * ES9080Q decodes it as left-justified data on the negative edge of
+	 * the 1-BCLK WS pulse.
+	 *
+	 * Clock roles are per component (dai_link_component.ext_fmt): the
+	 * AIC3106 is the only BCLK/WCLK provider -- its PLL generates the
+	 * 256-BCLK/8-slot frame (256-clock mode, set in prepare) and AUX_MCLK
+	 * on GPIO1. The McASP, the ES9080Q and both ADC3140s are consumers.
+	 * The ES9080Q requires an integer MCLK:BCLK ratio, which only holds
+	 * because BCLK and AUX_MCLK derive from the one AIC3106 PLL. A single
+	 * link-wide CBP_CFP would wrongly tell the ADC3140s to master the bus
+	 * they share with the AIC3106.
 	 */
-	const unsigned int dai_fmt = SND_SOC_DAIFMT_DSP_B | SND_SOC_DAIFMT_IB_NF |
-				     SND_SOC_DAIFMT_CBC_CFC;
+	const unsigned int dai_fmt = SND_SOC_DAIFMT_DSP_A | SND_SOC_DAIFMT_IB_NF;
 	struct bela_gem_priv *priv;
 	int ret;
 
@@ -246,72 +367,82 @@ static int bela_gem_probe(struct platform_device *pdev)
 		goto err_put;
 	}
 
-	/* Link 0: AIC3106 (clock master) */
+	/*
+	 * Link 0: McASP2 + { AIC3106, ES9080Q } (multi-codec).
+	 * Capture is AIC3106-only (the ES9080Q has no capture stream and is
+	 * skipped for that direction). Opening this link spins up the AIC3106 PLL
+	 * -> AUX_MCLK, which the ES9080Q needs before its own init runs in the
+	 * shared hw_params().
+	 *
+	 * Playback: ASoC does not intersect the codec channel ranges on a
+	 * multi-codec link (snd_soc_runtime_calc_hw() uses the CPU DAI's range
+	 * when num_codecs > 1), so the stream range comes from the McASP: both
+	 * TX serializers x 8 slots = up to 16 channels, interleaved as described
+	 * in the header comment. Each codec's own hw_params() is fixed up from
+	 * its TDM slot mask (set in bela_gem_play_init()): the AIC3106 sees 2
+	 * channels and the ES9080Q sees 8, whatever the stream width. The
+	 * startup hook limits playback to {1, 2, 16}.
+	 */
 	priv->cpu[0].of_node		  = cpu_node;
+	priv->cpu[0].ext_fmt		  = SND_SOC_DAIFMT_BC_FC;
 	priv->platform[0].of_node	  = cpu_node;
-	priv->aic_codec.of_node		  = aic_node;
-	priv->aic_codec.dai_name	  = "tlv320aic3x-hifi";
-	priv->dai_links[0].name		  = "bela-gem-aic";
-	priv->dai_links[0].stream_name	  = "Bela Gem Stereo";
+	priv->play_codecs[0].of_node	  = aic_node;
+	priv->play_codecs[0].dai_name	  = "tlv320aic3x-hifi";
+	priv->play_codecs[0].ext_fmt	  = SND_SOC_DAIFMT_BP_FP;
+	priv->play_codecs[1].of_node	  = dac_node;
+	priv->play_codecs[1].dai_name	  = "es9080q-hifi";
+	priv->play_codecs[1].ext_fmt	  = SND_SOC_DAIFMT_BC_FC;
+	priv->dai_links[0].name		  = "bela-gem-play";
+	priv->dai_links[0].stream_name	  = "Bela Gem Playback";
 	priv->dai_links[0].cpus		  = &priv->cpu[0];
 	priv->dai_links[0].num_cpus	  = 1;
-	priv->dai_links[0].codecs	  = &priv->aic_codec;
-	priv->dai_links[0].num_codecs	  = 1;
+	priv->dai_links[0].codecs	  = priv->play_codecs;
+	priv->dai_links[0].num_codecs	  = ARRAY_SIZE(priv->play_codecs);
 	priv->dai_links[0].platforms	  = &priv->platform[0];
 	priv->dai_links[0].num_platforms  = 1;
-	priv->dai_links[0].init		  = bela_gem_aic_init;
+	priv->dai_links[0].init		  = bela_gem_play_init;
+	priv->dai_links[0].ops		  = &bela_gem_play_ops;
 	priv->dai_links[0].dai_fmt	  = dai_fmt;
 
-	/* Link 1: ES9080Q (8-ch playback, slave) */
+	/* Link 1: ADC3140 #1 (4-ch capture, clock consumer) */
 	priv->cpu[1].of_node		  = cpu_node;
+	priv->cpu[1].ext_fmt		  = SND_SOC_DAIFMT_BC_FC;
 	priv->platform[1].of_node	  = cpu_node;
-	priv->dac_codec.of_node		  = dac_node;
-	priv->dac_codec.dai_name	  = "es9080q-hifi";
-	priv->dai_links[1].name		  = "bela-gem-dac";
-	priv->dai_links[1].stream_name	  = "Bela Gem 8ch DAC";
+	priv->adc1_codec.of_node	  = adc1_node;
+	priv->adc1_codec.dai_name	  = "tlv320adcx140-codec";
+	priv->adc1_codec.ext_fmt	  = SND_SOC_DAIFMT_BC_FC;
+	priv->dai_links[1].name		  = "bela-gem-adc1";
+	priv->dai_links[1].stream_name	  = "Bela Gem ADC1";
 	priv->dai_links[1].cpus		  = &priv->cpu[1];
 	priv->dai_links[1].num_cpus	  = 1;
-	priv->dai_links[1].codecs	  = &priv->dac_codec;
+	priv->dai_links[1].codecs	  = &priv->adc1_codec;
 	priv->dai_links[1].num_codecs	  = 1;
 	priv->dai_links[1].platforms	  = &priv->platform[1];
 	priv->dai_links[1].num_platforms  = 1;
-	priv->dai_links[1].init		  = bela_gem_dac_init;
+	priv->dai_links[1].init		  = bela_gem_adc_init;
+	priv->dai_links[1].ops		  = &bela_gem_adc_ops;
 	priv->dai_links[1].dai_fmt	  = dai_fmt;
-	priv->dai_links[1].playback_only  = 1;
+	priv->dai_links[1].capture_only	  = 1;
 
-	/* Link 2: ADC3140 #1 (4-ch capture, slave) */
+	/* Link 2: ADC3140 #2 (4-ch capture, clock consumer) */
 	priv->cpu[2].of_node		  = cpu_node;
+	priv->cpu[2].ext_fmt		  = SND_SOC_DAIFMT_BC_FC;
 	priv->platform[2].of_node	  = cpu_node;
-	priv->adc1_codec.of_node	  = adc1_node;
-	priv->adc1_codec.dai_name	  = "tlv320adcx140-codec";
-	priv->dai_links[2].name		  = "bela-gem-adc1";
-	priv->dai_links[2].stream_name	  = "Bela Gem ADC1";
+	priv->adc2_codec.of_node	  = adc2_node;
+	priv->adc2_codec.dai_name	  = "tlv320adcx140-codec";
+	priv->adc2_codec.ext_fmt	  = SND_SOC_DAIFMT_BC_FC;
+	priv->dai_links[2].name		  = "bela-gem-adc2";
+	priv->dai_links[2].stream_name	  = "Bela Gem ADC2";
 	priv->dai_links[2].cpus		  = &priv->cpu[2];
 	priv->dai_links[2].num_cpus	  = 1;
-	priv->dai_links[2].codecs	  = &priv->adc1_codec;
+	priv->dai_links[2].codecs	  = &priv->adc2_codec;
 	priv->dai_links[2].num_codecs	  = 1;
 	priv->dai_links[2].platforms	  = &priv->platform[2];
 	priv->dai_links[2].num_platforms  = 1;
 	priv->dai_links[2].init		  = bela_gem_adc_init;
+	priv->dai_links[2].ops		  = &bela_gem_adc_ops;
 	priv->dai_links[2].dai_fmt	  = dai_fmt;
 	priv->dai_links[2].capture_only	  = 1;
-
-	/* Link 3: ADC3140 #2 (4-ch capture, slave) */
-	priv->cpu[3].of_node		  = cpu_node;
-	priv->platform[3].of_node	  = cpu_node;
-	priv->adc2_codec.of_node	  = adc2_node;
-	priv->adc2_codec.dai_name	  = "tlv320adcx140-codec";
-	priv->dai_links[3].name		  = "bela-gem-adc2";
-	priv->dai_links[3].stream_name	  = "Bela Gem ADC2";
-	priv->dai_links[3].cpus		  = &priv->cpu[3];
-	priv->dai_links[3].num_cpus	  = 1;
-	priv->dai_links[3].codecs	  = &priv->adc2_codec;
-	priv->dai_links[3].num_codecs	  = 1;
-	priv->dai_links[3].platforms	  = &priv->platform[3];
-	priv->dai_links[3].num_platforms  = 1;
-	priv->dai_links[3].init		  = bela_gem_adc_init;
-	priv->dai_links[3].dai_fmt	  = dai_fmt;
-	priv->dai_links[3].capture_only	  = 1;
 
 	/*
 	 * The two TLV320ADC3140s are identical codecs, so they register
@@ -330,7 +461,6 @@ static int bela_gem_probe(struct platform_device *pdev)
 	of_node_put(dac_node);
 	of_node_put(adc1_node);
 	of_node_put(adc2_node);
-	cpu_node = aic_node = dac_node = adc1_node = adc2_node = NULL;
 
 	/* MCLK (audio_refclk1) — enable once; AIC PLL derives BCLK/WCLK. */
 	priv->mclk = devm_clk_get(dev, "mclk");
@@ -365,7 +495,6 @@ static int bela_gem_probe(struct platform_device *pdev)
 	priv->card.fully_routed	    = true;
 
 	snd_soc_of_parse_card_name(&priv->card, "model");
-	snd_soc_of_parse_audio_routing(&priv->card, "audio-routing");
 	snd_soc_card_set_drvdata(&priv->card, priv);
 
 	ret = devm_snd_soc_register_card(dev, &priv->card);

@@ -197,11 +197,14 @@ config SND_SOC_AM625_BELA_GEM
 	depends on ARCH_K3 || COMPILE_TEST
 	depends on SND_SOC_DAVINCI_MCASP && I2C
 	select SND_SOC_TLV320AIC3X
+	select SND_SOC_TLV320AIC3X_I2C
 	select SND_SOC_ES9080Q
+	select SND_SOC_TLV320ADCX140
 	help
 	  Support for the Bela Gem Multi audio cape on PocketBeagle2 (AM625).
-	  Provides a 10-output + 2-input TDM sound card using TLV320AIC3106
-	  (stereo) and ES9080Q (8-channel DAC) on a shared McASP2 bus.
+	  Provides a TDM sound card on a shared McASP2 bus with: TLV320AIC3106
+	  (stereo I/O, clock master), ES9080Q (8-channel DAC), and two
+	  TLV320ADC3140 quad-channel capture ADCs.
 
 endmenu
 

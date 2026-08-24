@@ -5,22 +5,22 @@
  * Targets the custom machine driver am625-bela-gem.c
  * (compatible "ti,am625-bela-gem-multi").
  *
- * Codecs on main_i2c1 (bus shows as /dev/i2c-2):
- *   TLV320AIC3106  @0x18  — stereo I/O, clock slave (BCLK/WCLK from McASP)
- *   ES9080Q        @0x48  — 8-channel DAC, clock slave (write-only @0x4c)
- *   TLV320ADC3140  @0x4e  — 4-channel ADC #1, clock slave (capture)
- *   TLV320ADC3140  @0x4f  — 4-channel ADC #2, clock slave (capture)
- *   (ADC addresses confirmed with `i2cdetect -y 2` at bring-up; adjust reg if needed.)
+ * Codecs on main_i2c1 (Linux bus number varies by config — check i2cdetect -l):
+ *   TLV320AIC3106  @0x18  — stereo I/O, BCLK/WCLK master (PLL from MCLK)
+ *   ES9080Q        @0x48  — 8-channel DAC, clock consumer (write-only @0x4c)
+ *   TLV320ADC3140  @0x4e  — 4-channel ADC #1, clock consumer (capture)
+ *   TLV320ADC3140  @0x4f  — 4-channel ADC #2, clock consumer (capture)
  *
- * Clock topology (McASP is BCLK+WCLK master; AIC3106 and all other codecs are
- * clock slaves on the TDM bus):
- *   audio_refclk1 (12.288 MHz) -> P2.11 MCLK -> codec MCLK inputs
- *   mcasp2 fck (24.576 MHz, pinned via assigned-clock-rates) divided by 2 ->
- *   P2.19 BCLK (12.288 MHz) + P2.10 WCLK (48 kHz) -> all codec BCLK/WCLK inputs
- *   Machine driver does clk_get(dev,"mclk") + clk_prepare_enable(), so the
- *   sound node carries clocks=<&audio_refclk1>, clock-names="mclk".
+ * Clock topology (TLV320AIC3106 is the BCLK+WCLK master; McASP2 and the other
+ * codecs are clock consumers):
+ *   audio_refclk1 (24 MHz) -> P2.11 MCLK -> AIC3106 MCLK input
+ *   AIC3106 PLL -> P2.19 BCLK (256 x fs) + P2.10 WCLK -> McASP2 + all codecs
+ *   AIC3106 PLL -> GPIO1 pad (AUX_MCLK) -> ES9080Q + ADC3140 MCLK inputs
+ *   BCLK and AUX_MCLK derive from the one AIC3106 PLL because the ES9080Q
+ *   requires an integer MCLK:BCLK ratio. The machine driver enables
+ *   audio_refclk1 via clocks=<&audio_refclk1>, clock-names="mclk".
  *
- * Shared McASP2 frame: 8 slots x 32-bit, DSP_B (TDM). Each codec uses its OWN
+ * Shared McASP2 frame: 8 slots x 32-bit, DSP_A (1-bit delay). Each codec uses its OWN
  * serializer (data pin) and emits/consumes its channels from slot 0 of that line:
  *   AXR0 (P2.05) TX -> TLV DIN   (playback, slots 0-1)
  *   AXR1 (P2.07) RX <- TLV DOUT  (capture,  slots 0-1)
@@ -43,12 +43,6 @@
 
 /dts-v1/;
 /plugin/;
-
-&{/chosen} {
-	overlays {
-		k3-am62-pocketbeagle2-bela-gem-multi.kernel = __TIMESTAMP__;
-	};
-};
 
 /* Regulators + machine-driver sound card */
 &{/} {
@@ -112,8 +106,8 @@
 		pinctrl-single,pins = <
 			AM62X_IOPAD(0x01d8, PIN_OUTPUT, 8) /* (C15) MCASP2_AXR0, P2.05 TX -> TLV DIN (playback) */
 			AM62X_IOPAD(0x01dc, PIN_INPUT,  8) /* (E15) MCASP2_AXR1, P2.07 RX <- TLV DOUT (capture) */
-			AM62X_IOPAD(0x0174, PIN_OUTPUT, 2) /* (AD21) MCASP2_AFSX,  P2.10 WCLK (McASP-driven, frame master) */
-			AM62X_IOPAD(0x0178, PIN_OUTPUT, 2) /* (AC20) MCASP2_ACLKX, P2.19 BCLK (McASP-driven, bit-clock master) */
+			AM62X_IOPAD(0x0174, PIN_INPUT, 2) /* (AD21) MCASP2_AFSX,  P2.10 WCLK (input: AIC3106 is frame master) */
+			AM62X_IOPAD(0x0178, PIN_INPUT, 2) /* (AC20) MCASP2_ACLKX, P2.19 BCLK (input: AIC3106 is bit-clock master) */
 			AM62X_IOPAD(0x016c, PIN_OUTPUT, 2) /* (Y18) MCASP2_AXR6,  P1.04 TX -> ES9080Q DIN1 (8ch) */
 			AM62X_IOPAD(0x0164, PIN_INPUT,  2) /* (AA19) MCASP2_AXR4, P1.02 RX <- ADC3140 #1 DOUT */
 			AM62X_IOPAD(0x0170, PIN_INPUT,  5) /* (AA18) MCASP2_AXR8, P2.31 RX <- ADC3140 #2 DOUT */
@@ -134,8 +128,15 @@
 };
 
 &audio_refclk1 {
-	/* 12.288 MHz (96 MHz / 8). Machine driver enables this as "mclk". */
-	assigned-clock-rates = <12288000>;
+	/*
+	 * 24 MHz = AUDIO_REFCLK_PLL (96 MHz, clk:157:17) / 4.
+	 * The main dtsi assigns parent <&k3_clks 157 18> (PER1_PLL, 100 MHz),
+	 * which cannot produce standard audio rates (100/4.1 ≈ 24.39 MHz).
+	 * Switching to AUDIO_REFCLK_PLL (96 MHz) gives an exact 24 MHz output
+	 * (= 500 × 48 kHz) for a clean integer MCLK-to-fs ratio.
+	 */
+	assigned-clock-parents = <&k3_clks 157 17>;
+	assigned-clock-rates = <24000000>;
 	pinctrl-names = "default";
 	pinctrl-0 = <&bela_multi_mclk_pins>;
 };
@@ -157,7 +158,7 @@
 	pinctrl-names = "default";
 	pinctrl-0 = <&bela_multi_ctrl_pins>;
 
-	bela_codec_enable {
+	bela-codec-enable-hog {
 		gpio-hog;
 		gpios = <53 GPIO_ACTIVE_LOW>;
 		output-low;	/* ACTIVE_LOW + output-low => raw pad HIGH */
@@ -196,12 +197,12 @@
 	};
 
 	/*
-	 * TLV320ADC3140 quad-channel ADCs. Both are TDM/DSP_B capture slaves,
+	 * TLV320ADC3140 quad-channel ADCs. Both are TDM/DSP_A capture slaves,
 	 * clocked by the AIC3106 BCLK/WCLK. Each drives its own McASP RX
 	 * serializer (AXR4 / AXR8). avdd = 3.3V, iovdd = 3.3V (board rails).
 	 * The on-chip areg LDO supplies the 1.8V analog domain (no "areg" phandle).
 	 * RESETN shares GPIO0_53 with ES9080 CHIP_EN and is held HIGH by the
-	 * bela_codec_enable hog above. We deliberately do NOT use reset-gpios here:
+	 * bela-codec-enable-hog above. We deliberately do NOT use reset-gpios here:
 	 * a pulsed reset would also drop ES9080Q CHIP_EN and break its probe.
  */
 	adc3140_1: adc@4e {
@@ -229,15 +230,13 @@
 	status = "okay";
 
 	/*
-	 * McASP2 is the BCLK + WCLK (frame) master for the whole TDM bus; all
-	 * codecs are clock consumers. A stereo codec (TLV320AIC3106) cannot
-	 * master a frame wider than its 2 channels, so the McASP generates the
-	 * 8-slot frame instead. The functional clock is pinned to 24.576 MHz
-	 * below, and the machine driver passes the same rate via set_sysclk so
-	 * the McASP programs the BCLK divider: 24.576 MHz / 2 = 12.288 MHz
-	 * (= 256 * 48 kHz = 8 slots * 32 bits * 48 kHz). auxclk-fs-ratio is
-	 * also present for rate-constraint negotiation but is not sufficient
-	 * alone (does not program the BCLK divider hardware).
+	 * McASP2 is a BCLK/WCLK CONSUMER: the TLV320AIC3106 masters the frame
+	 * (its PLL emits BCLK, WCLK and AUX_MCLK from one clock source, which
+	 * the ES9080Q's integer MCLK:BCLK requirement demands; the machine
+	 * driver sets 256-clock mode so the AIC3106 emits the 8-slot frame).
+	 * The ACLKX/AFSX pads are muxed as inputs in bela_multi_audio_pins.
+	 * The functional clock below only feeds the McASP's internal logic;
+	 * auxclk-fs-ratio assists rate-constraint negotiation.
 	 */
 	assigned-clocks = <&k3_clks 192 0>;
 	assigned-clock-rates = <24576000>;
@@ -249,12 +248,20 @@
 
 	/*
 	 * serial-dir convention: 0=inactive, 1=TX, 2=RX (AXR index = position).
-	 *   AXR0 (P2.05) = TX (1) -> TLV DIN   (playback)
+	 *   AXR0 (P2.05) = TX (1) -> TLV320AIC3106 DIN (stereo playback)
 	 *   AXR1 (P2.07) = RX (2) <- TLV DOUT  (capture)
 	 *   AXR4 (P1.02) = RX (2) <- ADC3140 #1 DOUT
-	 *   AXR6 (P1.04) = TX (1) -> ES9080Q DIN1
+	 *   AXR6 (P1.04) = TX (1) -> ES9080Q DIN1 (8-ch playback)
 	 *   AXR8 (P2.31) = RX (2) <- ADC3140 #2 DOUT
- */
+	 *
+	 * With both TX serializers active, davinci-mcasp interleaves a
+	 * 16-channel playback stream round-robin: even channels -> AXR0
+	 * (AIC3106, slots 0-1 audible), odd channels -> AXR6 (ES9080Q OUT1-8).
+	 * A stereo stream activates AXR0 alone. The machine driver constrains
+	 * playback to {1, 2, 16} channels; the counts in between would land
+	 * entirely on AXR0 and never reach the DAC. This matches Bela's
+	 * shipping configuration (outSerializers axr0 mask 0x3, axr6 mask 0xff).
+	 */
 	serial-dir = <
 		1 2 0 0     /* AXR0=TX, AXR1=RX, AXR2=off, AXR3=off */
 		2 0 1 0     /* AXR4=RX, AXR5=off, AXR6=TX, AXR7=off */
